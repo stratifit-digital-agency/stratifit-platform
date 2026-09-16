@@ -8,21 +8,25 @@
     "build": "next build",
     "start": "next start -p 3100",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "vitest run"
   },
   "dependencies": {
+    "@stratifit/ai": "workspace:*",
     "@stratifit/auth": "workspace:*",
     "@stratifit/compute": "workspace:*",
     "@stratifit/contracts": "workspace:*",
     "@stratifit/database": "workspace:*",
     "@stratifit/events": "workspace:*",
+    "@stratifit/identity": "workspace:*",
     "@stratifit/permissions": "workspace:*",
     "@stratifit/production-engine": "workspace:*",
     "@stratifit/publishing-engine": "workspace:*",
     "@stratifit/storage": "workspace:*",
     "@stratifit/ui": "workspace:*",
-    "@stratifit/ai": "workspace:*",
     "@stratifit/workflows": "workspace:*",
+    "@supabase/ssr": "^0.7.0",
+    "@supabase/supabase-js": "^2.81.1",
     "next": "^16.0.7",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
@@ -32,6 +36,7 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.2",
     "tailwindcss": "^4.1.18",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
   }
 }

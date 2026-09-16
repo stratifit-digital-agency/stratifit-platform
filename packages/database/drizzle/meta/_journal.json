@@ -8,6 +8,20 @@
       "when": 1789564304386,
       "tag": "0000_freezing_hammerhead",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789589139234,
+      "tag": "0001_old_alex_wilder",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789589139235,
+      "tag": "0002_identity_seed",
+      "breakpoints": true
     }
   ]
 }

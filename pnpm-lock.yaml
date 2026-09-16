@@ -59,6 +59,9 @@ importers:
       '@stratifit/events':
         specifier: workspace:*
         version: link:../../packages/events
+      '@stratifit/identity':
+        specifier: workspace:*
+        version: link:../../services/identity
       '@stratifit/permissions':
         specifier: workspace:*
         version: link:../../packages/permissions
@@ -77,6 +80,12 @@ importers:
       '@stratifit/workflows':
         specifier: workspace:*
         version: link:../../packages/workflows
+      '@supabase/ssr':
+        specifier: ^0.7.0
+        version: 0.7.0(@supabase/supabase-js@2.116.0)
+      '@supabase/supabase-js':
+        specifier: ^2.81.1
+        version: 2.116.0
       next:
         specifier: ^16.0.7
         version: 16.3.5(@types/node@24.13.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -102,6 +111,9 @@ importers:
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@24.13.4)(jiti@2.7.0)(lightningcss@1.32.0)(supports-color@7.2.0)(tsx@4.23.13)
 
   apps/stratifit-media:
     dependencies:
@@ -111,6 +123,9 @@ importers:
       '@stratifit/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@stratifit/identity':
+        specifier: workspace:*
+        version: link:../../services/identity
       '@stratifit/publishing-engine':
         specifier: workspace:*
         version: link:../../services/publishing-engine
@@ -161,12 +176,6 @@ importers:
       '@stratifit/contracts':
         specifier: workspace:*
         version: link:../contracts
-      '@supabase/ssr':
-        specifier: ^0.7.0
-        version: 0.7.0(@supabase/supabase-js@2.116.0)
-      '@supabase/supabase-js':
-        specifier: ^2.81.1
-        version: 2.116.0
     devDependencies:
       vitest:
         specifier: ^3.2.4
@@ -251,6 +260,28 @@ importers:
       '@stratifit/contracts':
         specifier: workspace:*
         version: link:../contracts
+    devDependencies:
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@24.13.4)(jiti@2.7.0)(lightningcss@1.32.0)(supports-color@7.2.0)(tsx@4.23.13)
+
+  services/identity:
+    dependencies:
+      '@stratifit/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
+      '@stratifit/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@stratifit/permissions':
+        specifier: workspace:*
+        version: link:../../packages/permissions
+      '@supabase/supabase-js':
+        specifier: ^2.81.1
+        version: 2.116.0
+      drizzle-orm:
+        specifier: ^0.44.7
+        version: 0.44.7(postgres@3.4.9)
     devDependencies:
       vitest:
         specifier: ^3.2.4

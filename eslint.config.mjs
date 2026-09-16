@@ -30,6 +30,13 @@ const elementTypes = [
   },
   // Public-safe shared packages (identity rules, UI primitives).
   { type: "public-package", pattern: "packages/{ui,auth,permissions,events}/**", mode: "full" },
+  // PUBLIC-SAFE FRAGMENT of the identity service (audience resolution only).
+  // Declared BEFORE the internal identity pattern: first match wins, so only
+  // services/identity/src/public/** is reachable from the public app
+  // (SERVICE_ARCHITECTURE section 13 public-safe-fragment mechanism).
+  { type: "public-safe-fragment", pattern: "services/identity/src/public/**", mode: "full" },
+  // Identity service (internal; owns durable identity state per Decision 3).
+  { type: "identity-service", pattern: "services/identity/**", mode: "full" },
   // Production domain — internal only. Publishing must NOT import it.
   { type: "internal-service", pattern: "services/production-engine/**", mode: "full" },
   // Public-safe domain services (published-content read API today).
@@ -100,6 +107,18 @@ export default [
               from: "public-service",
               allow: ["contracts", "public-package", "internal-package", "public-service"],
             },
+            // Identity service internals: contracts, packages, and its own
+            // public fragment; never the applications.
+            {
+              from: "identity-service",
+              allow: ["contracts", "public-package", "internal-package", "identity-service", "public-safe-fragment"],
+            },
+            // The public fragment may only see contracts, public-safe packages,
+            // and its own module internals (which bring the database package).
+            {
+              from: "public-safe-fragment",
+              allow: ["contracts", "public-package", "internal-package", "identity-service"],
+            },
             // Control (internal app) may access authorized internal capabilities.
             {
               from: "control-app",
@@ -109,6 +128,8 @@ export default [
                 "public-package",
                 "internal-service",
                 "public-service",
+                "identity-service",
+                "public-safe-fragment",
                 "control-app",
               ],
             },
@@ -116,10 +137,10 @@ export default [
             // Self-imports are allowed; disallow takes precedence over allow.
             {
               from: "media-app",
-              allow: ["contracts", "public-package", "public-service", "media-app"],
-              disallow: ["internal-package", "internal-service"],
+              allow: ["contracts", "public-package", "public-service", "public-safe-fragment", "media-app"],
+              disallow: ["internal-package", "internal-service", "identity-service"],
               message:
-                "Stratifit Media must not access internal production infrastructure (compute, AI, workflows, database, storage, production-engine).",
+                "Stratifit Media must not access internal production infrastructure (compute, AI, workflows, database, storage, production-engine) or identity-service internals — only the public-safe fragment.",
             },
           ],
         },

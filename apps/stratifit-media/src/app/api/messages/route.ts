@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { startConversation } from "@/lib/messaging";
-import type { AudienceIdentity } from "@stratifit/auth";
+import { resolveMediaIdentity } from "@/lib/identity";
 
 export const dynamic = "force-dynamic";
 
@@ -61,9 +61,11 @@ const errorResponse = (code: string, status: number, message: string) =>
   );
 
 export async function POST(request: Request) {
-  // Foundation phase: no live auth wiring yet; identity is null until Supabase
-  // is connected, so this endpoint correctly reports unauthenticated.
-  const identity: AudienceIdentity | null = null; // TODO(auth-wiring): resolve from session
+  // Stage 2.1: identity is resolved server-side from the session via the
+  // public-safe identity fragment (CD-1). Anonymous callers stay null and
+  // receive the unauthenticated envelope; unverified callers receive the
+  // email_verification_required envelope — enforced by lib/messaging.
+  const identity = await resolveMediaIdentity(request);
 
   let raw: unknown;
   try {

@@ -1,23 +1,43 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { gateDecision } from "@/lib/gate-decision";
+import { createControlRequestClient } from "@/lib/supabase-server";
 
 /**
- * Auth gate for the internal Control app.
+ * Auth gate for the internal Control app (activated in Stage 2.1).
  *
- * In the foundation phase there is no live identity provider, so the gate
- * runs in "checkpoint" mode: it documents and reserves the enforcement point.
- * When live Supabase auth is wired (later phase), a missing/invalid session
- * redirects to the operator login; nothing else about the app changes.
- *
- * NOTE: middleware can only make routing decisions. Real authorization is
- * enforced server-side in routes/services (never by client code).
+ * Middleware makes ROUTING DECISIONS only: a missing session redirects to
+ * /login; a missing issuer configuration fails closed (503). Identity
+ * resolution and real authorization (capability matrix) happen server-side in
+ * routes/pages via services/identity — never from client claims
+ * (API_ARCHITECTURE section 7).
  */
-export function middleware(_request: NextRequest) {
-  // TODO(auth-wiring): verify operator session via Supabase; redirect to
-  // /login when absent. Kept permissive in the foundation so the shell is
-  // reviewable without credentials.
-  return NextResponse.next();
+export async function middleware(request: NextRequest) {
+  const env = {
+    supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL,
+    supabaseAnonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+  };
+
+  // Fail closed before touching the issuer when configuration is absent.
+  if (!env.supabaseUrl || !env.supabaseAnonKey) {
+    return NextResponse.rewrite(new URL("/login", request.url), { status: 503 });
+  }
+
+  const { client, getResponse } = createControlRequestClient(request);
+  const {
+    data: { user },
+  } = await client.auth.getUser();
+  const decision = gateDecision({ userId: user?.id ?? null }, env);
+
+  switch (decision.action) {
+    case "redirect":
+      return NextResponse.redirect(new URL(decision.location, request.url));
+    case "fail-closed":
+      return NextResponse.rewrite(new URL("/login", request.url), { status: 503 });
+    default:
+      return getResponse();
+  }
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|api/health).*)"],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|api/health|auth/callback|login).*)"],
 };

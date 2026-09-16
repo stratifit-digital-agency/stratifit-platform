@@ -67,10 +67,3 @@ export const authorizeAudienceAction = (
   }
   return { allowed: true };
 };
-
-/**
- * Placeholder Supabase client factory for the later wiring phase.
- * Kept out of any browser bundle; Media never imports production internals
- * and this module never embeds secrets.
- */
-export const createSupabaseClientStub = (): { wired: false } => ({ wired: false });
