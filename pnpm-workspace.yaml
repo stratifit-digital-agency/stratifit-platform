@@ -1,0 +1,12 @@
+packages:
+  - "apps/*"
+  - "services/*"
+  - "packages/*"
+
+allowBuilds:
+  unrs-resolver: true
+
+# pnpm 10+ reads these settings from pnpm-workspace.yaml, not package.json.
+onlyBuiltDependencies:
+  - esbuild
+  - unrs-resolver

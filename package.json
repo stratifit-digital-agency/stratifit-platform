@@ -1,0 +1,32 @@
+{
+  "name": "stratifit-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stratifit Platform — AI-native media and entertainment operating platform (monorepo foundation)",
+  "packageManager": "pnpm@11.16.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "format": "prettier --write \"**/*.{ts,tsx,md,json,yaml,yml,mjs}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,md,json,yaml,yml,mjs}\"",
+    "db:generate": "pnpm --filter @stratifit/database db:generate"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@typescript-eslint/eslint-plugin": "^8.48.1",
+    "@typescript-eslint/parser": "^8.48.1",
+    "eslint": "^9.39.1",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-import-resolver-typescript": "^4.4.5",
+    "eslint-plugin-boundaries": "^5.0.1",
+    "prettier": "^3.6.2",
+    "turbo": "^2.6.1",
+    "typescript": "^5.9.3"
+  }
+}
