@@ -34,6 +34,12 @@ export const DomainEventName = z.enum([
   "conversation.created",
   "message.created",
   "message.read",
+  // identity & tenancy (Stage 2.2, approved D-5; producer: services/identity)
+  "membership.granted",
+  "membership.revoked",
+  "membership.updated",
+  "team.created",
+  "team.archived",
   // analytics
   "analytics.received",
 ]);

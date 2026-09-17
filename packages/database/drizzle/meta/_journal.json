@@ -22,6 +22,41 @@
       "when": 1789589139235,
       "tag": "0002_identity_seed",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1789593331292,
+      "tag": "0003_grey_spectrum",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789593331293,
+      "tag": "0004_membership_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789593331294,
+      "tag": "0005_rls_runtime_policies",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789613364273,
+      "tag": "0006_platform_config_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789613727742,
+      "tag": "0007_r1_grant_canonicalization",
+      "breakpoints": true
     }
   ]
 }

@@ -273,6 +273,9 @@ importers:
       '@stratifit/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@stratifit/events':
+        specifier: workspace:*
+        version: link:../../packages/events
       '@stratifit/permissions':
         specifier: workspace:*
         version: link:../../packages/permissions

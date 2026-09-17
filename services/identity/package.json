@@ -17,6 +17,7 @@
   "dependencies": {
     "@stratifit/auth": "workspace:*",
     "@stratifit/database": "workspace:*",
+    "@stratifit/events": "workspace:*",
     "@stratifit/permissions": "workspace:*",
     "@supabase/supabase-js": "^2.81.1",
     "drizzle-orm": "^0.44.7"
