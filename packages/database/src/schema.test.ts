@@ -6,10 +6,15 @@ import * as schemaExports from "./schema";
 import {
   auditLog,
   audienceUsers,
+  gateDecisionRecords,
+  manifestVersions,
   operators,
   organizations,
   orgMemberships,
   platformConfig,
+  productionPlanVersions,
+  productions,
+  projects,
   teams,
   verificationRequirements,
 } from "./schema";
@@ -30,10 +35,15 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
       [
         "auditLog",
         "audienceUsers",
+        "gateDecisionRecords",
+        "manifestVersions",
         "operators",
         "organizations",
         "orgMemberships",
         "platformConfig",
+        "productionPlanVersions",
+        "productions",
+        "projects",
         "teams",
         "verificationRequirements",
       ].sort(),
@@ -116,6 +126,11 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
       "verification_requirements",
       "teams",
       "org_memberships",
+      "projects",
+      "productions",
+      "production_plan_versions",
+      "gate_decision_records",
+      "manifest_versions",
     ]) {
       expect(sqlText).toContain(`ALTER TABLE "${table}" ENABLE ROW LEVEL SECURITY;`);
     }
@@ -175,6 +190,14 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   verification_requirements: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   // Decision 4: append-only audit trail. UPDATE/DELETE must never be granted.
   audit_log: ["INSERT", "SELECT"],
+  // Stage 2.6 (D2.6-4): mutable production aggregates get full arwd; the three
+  // immutable version families get INSERT + SELECT only — UPDATE/DELETE must
+  // never be granted, mirroring the audit_log append-only pattern.
+  projects: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  productions: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  production_plan_versions: ["INSERT", "SELECT"],
+  gate_decision_records: ["INSERT", "SELECT"],
+  manifest_versions: ["INSERT", "SELECT"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -274,13 +297,32 @@ describe("runtime privilege posture (approved least-privilege)", () => {
     );
     expect(offending).toEqual([]);
   });
+
+  it("stage 2.6 immutable families never receive UPDATE or DELETE grants", () => {
+    for (const table of ["production_plan_versions", "gate_decision_records", "manifest_versions"]) {
+      const grants = migrationText().flatMap((t) =>
+        uncommented(t).match(new RegExp(`GRANT [^;]*ON TABLE public\\.${table}[^;]*TO stratifit_runtime`, "g")) ?? [],
+      );
+      expect(grants.length).toBeGreaterThan(0);
+      for (const g of grants) expect(g).not.toMatch(/\b(UPDATE|DELETE)\b/);
+    }
+  });
+
+  it("stage 2.6 production tables are RLS-enabled with runtime-scoped policies only", () => {
+    const sqlText = migrationText().join("\n");
+    const policies = sqlText.match(/CREATE POLICY[^;]+;/g) ?? [];
+    const productionPolicies = policies.filter((p) =>
+      ["public.projects", "public.productions", "public.production_plan_versions", "public.gate_decision_records", "public.manifest_versions"].some((t) => p.includes(`ON ${t}`)),
+    );
+    expect(productionPolicies.length).toBeGreaterThanOrEqual(5);
+    for (const p of productionPolicies) expect(p).toContain("TO stratifit_runtime");
+  });
 });
 
 describe("domain-table guard (per approved plan)", () => {
-  it("contains no domain tables yet", () => {
+  it("contains only the approved Stage 2.6 production family beyond identity/tenancy", () => {
     const exported = Object.keys(schemaExports);
     const forbidden = [
-      "productions",
       "scenes",
       "shots",
       "assets",
@@ -292,5 +334,47 @@ describe("domain-table guard (per approved plan)", () => {
       "auditLogs",
     ];
     for (const name of forbidden) expect(exported).not.toContain(name);
+  });
+
+  it("productions status CHECK matches the DOMAIN_MODEL section 32 state machine", () => {
+    const migrationsDir2 = fileURLToPath(new URL("../drizzle/", import.meta.url));
+    const sqlText = readdirSync(migrationsDir2)
+      .filter((f) => f.endsWith(".sql"))
+      .sort()
+      .map((f) => readFileSync(`${migrationsDir2}/${f}`, "utf8"))
+      .join("\n");
+    expect(sqlText).toContain("productions_status_check");
+    for (const state of [
+      "draft", "planning", "in_gate", "approved", "queued", "in_production",
+      "post_production", "qc", "ready_for_publication", "published", "archived",
+      "on_hold", "changes_requested", "cancelled",
+    ]) {
+      expect(sqlText).toContain(`'${state}'`);
+    }
+  });
+
+  it("projects: org-scoped unique slug; productions: org+project indexes", () => {
+    const c = getTableColumns(projects);
+    expect(Object.keys(c).sort()).toEqual(
+      ["createdAt", "createdBy", "description", "id", "name", "orgId", "slug", "status", "updatedAt"],
+    );
+    expect(c.orgId.notNull).toBe(true);
+    const p = getTableColumns(productions);
+    expect(Object.keys(p).sort()).toEqual(
+      ["createdAt", "currentManifestVersionId", "currentPlanVersionId", "id", "kind", "orgId", "projectId", "status", "title", "updatedAt"],
+    );
+    expect(p.orgId.notNull).toBe(true);
+    expect(p.projectId.notNull).toBe(true);
+    expect(p.status.notNull).toBe(true);
+  });
+
+  it("immutable version families carry unique (production, version) and no updatedAt", () => {
+    for (const t of [productionPlanVersions, gateDecisionRecords, manifestVersions]) {
+      expect("updatedAt" in getTableColumns(t)).toBe(false);
+    }
+    const c = getTableColumns(productionPlanVersions);
+    expect(c.versionNumber.notNull).toBe(true);
+    const m = getTableColumns(manifestVersions);
+    expect(m.versionNumber.notNull).toBe(true);
   });
 });

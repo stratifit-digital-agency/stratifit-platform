@@ -14,6 +14,11 @@ import {
   createDrizzleAuditRepository,
   type AdminAuditService,
 } from "@stratifit/admin-audit";
+import {
+  createDrizzleProductionRepository,
+  createProductionService,
+  type ProductionService,
+} from "@stratifit/production-engine";
 import { createDatabase } from "@stratifit/database";
 import { createControlCookieClient, controlAuthEnv } from "@/lib/supabase-server";
 
@@ -38,7 +43,11 @@ export interface ControlOperatorContext extends OperatorIdentityContext {
   readonly capabilities: readonly ControlCapability[];
 }
 
-let services: { membership: MembershipService; audit: AdminAuditService } | null = null;
+let services: {
+  membership: MembershipService;
+  audit: AdminAuditService;
+  production: ProductionService;
+} | null = null;
 
 const buildServices = () => {
   if (!services) {
@@ -65,8 +74,36 @@ const buildServices = () => {
           }),
       },
     });
+    // Stage 2.6: the production service shares the SAME Drizzle pool and the
+    // SAME audit transaction writer, so a security-critical production
+    // mutation (gate decision, approval, manifest issuance) and its audit
+    // record commit in the SAME transaction (D2.4-1 reused, not duplicated).
+    const production = createProductionService({
+      repository: createDrizzleProductionRepository({
+        db,
+        // Composition-root adapter: the production engine's seam shape
+        // (targetType/targetId/metadata) maps to admin-audit's canonical
+        // entry shape (subjectKind/subjectId/payload) — the same mapping the
+        // membership path uses. The writer runs on the transaction connection
+        // handed to it — same-transaction per D2.4-1.
+        auditWriter: {
+          appendWithin: (tx, entry) =>
+            writer.appendWithin(tx, {
+              actorId: entry.actorId,
+              action: entry.action,
+              subjectKind: entry.targetType,
+              subjectId: entry.targetId,
+              organizationId: entry.organizationId ?? null,
+              correlationId: entry.correlationId ?? null,
+              causationId: entry.causationId ?? null,
+              payload: entry.metadata ?? {},
+            }),
+        },
+      }),
+    });
     services = {
       audit: audit,
+      production,
       membership: createMembershipService({
         repository: membershipRepo,
         // D2.4-1: transaction path is primary; this fallback seam is unused
@@ -95,6 +132,9 @@ export const getMembershipService = (): MembershipService => buildServices().mem
 
 /** Exposed for the audit trail query route (D2.4-2 org-scoped reads). */
 export const getAuditService = (): AdminAuditService => buildServices().audit;
+
+/** Exposed for the Stage 2.6 /api/control/{projects,productions} routes. */
+export const getProductionService = (): ProductionService => buildServices().production;
 
 /** Resolve the current operator server-side; null when anonymous/unprovisioned. */
 export const resolveControlOperator = async (): Promise<ControlOperatorContext | null> => {

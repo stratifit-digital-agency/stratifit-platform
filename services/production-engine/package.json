@@ -14,9 +14,15 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@stratifit/contracts": "workspace:*"
+    "@stratifit/auth": "workspace:*",
+    "@stratifit/contracts": "workspace:*",
+    "@stratifit/database": "workspace:*",
+    "@stratifit/events": "workspace:*",
+    "@stratifit/permissions": "workspace:*",
+    "drizzle-orm": "^0.44.7"
   },
   "devDependencies": {
+    "postgres": "^3.4.7",
     "vitest": "^3.2.4"
   }
 }

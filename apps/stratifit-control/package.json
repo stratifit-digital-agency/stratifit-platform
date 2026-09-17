@@ -26,6 +26,7 @@
     "@stratifit/storage": "workspace:*",
     "@stratifit/ui": "workspace:*",
     "@stratifit/workflows": "workspace:*",
+    "zod": "^4.0.17",
     "@supabase/ssr": "^0.7.0",
     "@supabase/supabase-js": "^2.81.1",
     "next": "^16.0.7",

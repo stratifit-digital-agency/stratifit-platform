@@ -3,6 +3,7 @@ import {
   boolean,
   check,
   index,
+  integer,
   jsonb,
   pgTable,
   text,
@@ -249,6 +250,16 @@ export type PlatformConfigRow = typeof platformConfig.$inferSelect;
 export type NewPlatformConfigRow = typeof platformConfig.$inferInsert;
 export type AuditLogRow = typeof auditLog.$inferSelect;
 export type NewAuditLogRow = typeof auditLog.$inferInsert;
+export type ProjectRow = typeof projects.$inferSelect;
+export type NewProjectRow = typeof projects.$inferInsert;
+export type ProductionRow = typeof productions.$inferSelect;
+export type NewProductionRow = typeof productions.$inferInsert;
+export type ProductionPlanVersionRow = typeof productionPlanVersions.$inferSelect;
+export type NewProductionPlanVersionRow = typeof productionPlanVersions.$inferInsert;
+export type GateDecisionRecordRow = typeof gateDecisionRecords.$inferSelect;
+export type NewGateDecisionRecordRow = typeof gateDecisionRecords.$inferInsert;
+export type ManifestVersionRow = typeof manifestVersions.$inferSelect;
+export type NewManifestVersionRow = typeof manifestVersions.$inferInsert;
 
 /**
  * Append-only audit trail (SERVICE_ARCHITECTURE section 11; Decision 4).
@@ -281,5 +292,190 @@ export const auditLog = pgTable(
     index("idx_audit_log_org_time").on(t.organizationId, t.occurredAt.desc()),
     index("idx_audit_log_subject").on(t.subjectKind, t.subjectId),
     index("idx_audit_log_actor_time").on(t.actorId, t.occurredAt.desc()),
+  ],
+).enableRLS();
+
+// ---------------------------------------------------------------------------
+// Production domain (Stage 2.6, approved decisions D2.6-1..D2.6-4)
+//
+// Conceptual owner: services/production-engine (SVC section 11 context 2).
+// Tenancy per D1: org_id NOT NULL on every table. Cross-module rule (D2):
+// the only FKs are intra-family (production -> production); downstream
+// families (assets, generations, jobs, QC, publications) reference the
+// production by loose ID in their own contexts. RLS enabled on all five;
+// runtime grants are explicit per-table in migration 0011 — arwd on the two
+// mutable aggregates, INSERT+SELECT only on the three immutable families
+// (D2.6-4, the audit_log pattern).
+// ---------------------------------------------------------------------------
+
+/**
+ * Aggregate root 4 (DM section 31): a container for productions inside one
+ * organization. Slug is unique PER ORG (like teams; unlike the globally
+ * unique organization slug).
+ */
+export const projects = pgTable(
+  "projects",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    slug: text("slug").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    status: text("status").notNull().default("active"),
+    createdBy: uuid("created_by")
+      .notNull()
+      .references(() => operators.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("projects_status_check", sql`${t.status} in ('active', 'archived')`),
+    unique("projects_org_slug_unique").on(t.orgId, t.slug),
+    index("idx_projects_org").on(t.orgId),
+  ],
+).enableRLS();
+
+/**
+ * Aggregate root 5 (DM section 31): the production lifecycle. Status carries
+ * the approved DOMAIN_MODEL section 32 state machine (explicit CHECK; no
+ * invented states). Plan/manifest pointers are version-family rows (DM
+ * section 33: immutable version rows + current pointer on the owner).
+ */
+export const productions = pgTable(
+  "productions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "restrict" }),
+    title: text("title").notNull(),
+    kind: text("kind").notNull(),
+    /** Null until the first plan version is recorded. */
+    currentPlanVersionId: uuid("current_plan_version_id"),
+    /** The production's current approved manifest version ref (nullable until issued). */
+    currentManifestVersionId: uuid("current_manifest_version_id"),
+    status: text("status").notNull().default("draft"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      // DOMAIN_MODEL section 32 state machine 1 — no invented states; the
+      // on_hold return path is a state, not an edge, so it is representable.
+      "productions_status_check",
+      sql`${t.status} in (
+        'draft', 'planning', 'in_gate', 'approved', 'queued', 'in_production',
+        'post_production', 'qc', 'ready_for_publication', 'published', 'archived',
+        'on_hold', 'changes_requested', 'cancelled'
+      )`,
+    ),
+    index("idx_productions_org").on(t.orgId),
+    index("idx_productions_project").on(t.projectId),
+  ],
+).enableRLS();
+
+/**
+ * Append-only plan version family (DM section 33: immutable version rows + a
+ * current pointer on the owning entity). Any material change creates a new
+ * row; nothing is updated or deleted (D2.6-4 grants: INSERT+SELECT only).
+ * The plan document is schema-validated inline jsonb (D2.6-2); script binaries
+ * remain a later-stage decision (DM Open Question 8 untouched).
+ */
+export const productionPlanVersions = pgTable(
+  "production_plan_versions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    productionId: uuid("production_id")
+      .notNull()
+      .references(() => productions.id, { onDelete: "cascade" }),
+    versionNumber: integer("version_number").notNull(),
+    /** Schema-validated @stratifit/contracts ProductionPlanDocument (D2.6-2). */
+    planDocument: jsonb("plan_document").$type<Record<string, unknown>>().notNull(),
+    createdBy: uuid("created_by")
+      .notNull()
+      .references(() => operators.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("production_plan_versions_version_number_check", sql`${t.versionNumber} > 0`),
+    unique("production_plan_versions_production_version_unique").on(t.productionId, t.versionNumber),
+    index("idx_production_plan_versions_production").on(t.productionId),
+  ],
+).enableRLS();
+
+/**
+ * Append-only gate decision family (DM section 7: "The persisted artifact is
+ * the Gate Decision Record (immutable)"). Each row snapshots the gate inputs
+ * and outcome for one plan version; approval (invariant 1) requires a row
+ * whose decision is 'pass' for the production's current plan version.
+ */
+export const gateDecisionRecords = pgTable(
+  "gate_decision_records",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    productionId: uuid("production_id")
+      .notNull()
+      .references(() => productions.id, { onDelete: "cascade" }),
+    planVersionId: uuid("plan_version_id")
+      .notNull()
+      .references(() => productionPlanVersions.id, { onDelete: "restrict" }),
+    decision: text("decision").notNull(),
+    /** Snapshot of the gate inputs (budget, moderation-planned) at evaluation. */
+    inputsSnapshot: jsonb("inputs_snapshot").$type<Record<string, unknown>>().notNull().default({}),
+    /** Structured gate issues when the evaluation did not pass. */
+    issues: jsonb("issues").$type<Record<string, unknown>[]>().notNull().default([]),
+    evaluatedBy: uuid("evaluated_by")
+      .notNull()
+      .references(() => operators.id, { onDelete: "restrict" }),
+    evaluatedAt: timestamp("evaluated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("gate_decision_records_decision_check", sql`${t.decision} in ('pass', 'fail')`),
+    index("idx_gate_decision_records_production").on(t.productionId),
+    index("idx_gate_decision_records_plan_version").on(t.planVersionId),
+  ],
+).enableRLS();
+
+/**
+ * Append-only manifest version family (DM section 7: "immutable once
+ * approved"). Each row stores one ProductionManifest document built by the
+ * existing manifest builder at approval/issuance time.
+ */
+export const manifestVersions = pgTable(
+  "manifest_versions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    productionId: uuid("production_id")
+      .notNull()
+      .references(() => productions.id, { onDelete: "cascade" }),
+    planVersionId: uuid("plan_version_id")
+      .notNull()
+      .references(() => productionPlanVersions.id, { onDelete: "restrict" }),
+    versionNumber: integer("version_number").notNull(),
+    /** The ProductionManifest contract document (packages/contracts manifest.ts). */
+    manifestDocument: jsonb("manifest_document").$type<Record<string, unknown>>().notNull(),
+    issuedBy: uuid("issued_by")
+      .notNull()
+      .references(() => operators.id, { onDelete: "restrict" }),
+    issuedAt: timestamp("issued_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("manifest_versions_version_number_check", sql`${t.versionNumber} > 0`),
+    unique("manifest_versions_production_version_unique").on(t.productionId, t.versionNumber),
+    index("idx_manifest_versions_production").on(t.productionId),
   ],
 ).enableRLS();

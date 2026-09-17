@@ -8,8 +8,10 @@ import { afterAll, describe, expect, it } from "vitest";
  * the git-ignored root .env, connecting as the migration role). Verifies
  * against the LIVE remote:
  *   - stratifit_runtime has NO privileges on platform_config;
- *   - per-table privilege map: six tenancy tables = arwd, audit_log =
- *     INSERT+SELECT only (append-only — UPDATE/DELETE must never exist);
+ *   - per-table privilege map: six tenancy tables + two mutable production
+ *     aggregates = arwd; audit_log + the three immutable Stage 2.6 production
+ *     version families = INSERT+SELECT only (append-only — UPDATE/DELETE must
+ *     never exist);
  *   - the blanket stratifit_app default table privilege is gone (Option A);
  *   - role attributes (LOGIN-only, non-superuser, no CREATEDB/CREATEROLE/
  *     REPLICATION/BYPASSRLS) and zero ownership;
@@ -33,7 +35,26 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "organizations",
     "teams",
     "verification_requirements",
+    "projects",
+    "productions",
   ] as const;
+
+  // Stage 2.6 immutable families (D2.6-4): INSERT + SELECT, never UPDATE/DELETE.
+  const immutableTables = ["production_plan_versions", "gate_decision_records", "manifest_versions"] as const;
+
+  it("grants stratifit_runtime INSERT+SELECT only on the Stage 2.6 immutable families", async () => {
+    const grants = await sql!`
+      select table_name, string_agg(privilege_type, ',' order by privilege_type) as privs
+      from information_schema.role_table_grants
+      where grantee = 'stratifit_runtime' and table_schema = 'public'
+      and table_name in ${sql!(immutableTables)}
+      group by table_name`;
+    expect(grants).toHaveLength(immutableTables.length);
+    for (const g of grants) {
+      expect(g.privs).toBe("INSERT,SELECT");
+      expect(immutableTables).toContain(g.table_name);
+    }
+  });
 
   // Decision 4: audit_log is append-only — INSERT + SELECT, never UPDATE/DELETE.
   it("audit_log grants stratifit_runtime INSERT+SELECT only (append-only enforcement)", async () => {
@@ -54,8 +75,12 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     const byTable = new Map(grants.map((g) => [g.table_name as string, g.privs as string]));
     for (const t of runtimeTables) expect(byTable.get(t)).toBe("DELETE,INSERT,SELECT,UPDATE");
     expect(byTable.get("platform_config")).toBeUndefined();
-    // audit_log is asserted separately (INSERT+SELECT only) above.
-    expect([...byTable.keys()].sort().filter((t) => t !== "audit_log")).toEqual([...runtimeTables].sort());
+    // audit_log and the three Stage 2.6 immutable families are asserted
+    // separately (INSERT+SELECT only) above/below.
+    const expectedArwd = [...runtimeTables].sort();
+    expect(
+      [...byTable.keys()].sort().filter((t) => t !== "audit_log" && !(immutableTables as readonly string[]).includes(t)),
+    ).toEqual(expectedArwd);
   });
 
   it("no stratifit_app default table privilege grants stratifit_runtime anything (Option A)", async () => {
@@ -83,18 +108,18 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     expect(owned[0]!.n).toBe(0);
   });
 
-  it("RLS stays enabled on the tenancy tables and audit_log with only runtime-scoped policies", async () => {
+  it("RLS stays enabled on the tenancy tables, audit_log, and the production family with only runtime-scoped policies", async () => {
     const rls = await sql!`
       select c.relname, c.relrowsecurity as enabled
       from pg_class c join pg_namespace n on n.oid = c.relnamespace
-      where n.nspname = 'public' and c.relname in ${sql!(runtimeTables)}`;
+      where n.nspname = 'public' and c.relname in ${sql!([...runtimeTables, ...immutableTables])}`;
     for (const r of rls) expect(r.enabled).toBe(true);
-    expect(rls).toHaveLength(runtimeTables.length);
+    expect(rls).toHaveLength(runtimeTables.length + immutableTables.length);
     const policies = await sql!`
       select count(*)::int as n from pg_policies
       where schemaname = 'public' and (roles is null or roles::text not like '%stratifit_runtime%')
       and tablename in ${sql!(runtimeTables)}`;
-    // Every policy on Stratifit tenancy tables must be runtime-scoped.
+    // Every policy on Stratifit tenancy/production tables must be runtime-scoped.
     expect(policies[0]!.n).toBe(0);
     // audit_log: RLS on, exactly the two append-only policies, both runtime-scoped.
     const [audit] = await sql!`
