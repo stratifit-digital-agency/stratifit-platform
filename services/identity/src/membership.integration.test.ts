@@ -22,7 +22,9 @@ const databaseUrl = hasEnv
   ? (readFileSync(envPath, "utf8").match(/^DATABASE_URL=(.+)$/m)?.[1]?.trim() ?? null)
   : null;
 const db = databaseUrl ? createDatabase(databaseUrl) : null;
-const repo = databaseUrl ? createDrizzleMembershipRepository({ db: db! }) : null;
+const repo = databaseUrl
+  ? createDrizzleMembershipRepository({ db: db!, auditWriter: { appendWithin: async () => {} } })
+  : null;
 
 const SUFFIX = randomUUID().slice(0, 8);
 const created = {

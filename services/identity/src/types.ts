@@ -129,6 +129,8 @@ export interface MembershipActor {
   readonly organizationId: string;
   readonly roles: readonly OperatorRole[];
   readonly capabilities: readonly ControlCapability[];
+  /** Optional correlation id propagated into audit records (Stage 2.4). */
+  readonly correlationId?: string | null;
 }
 
 export type MembershipCommandErrorReason =
@@ -154,6 +156,49 @@ export type MembershipCommandError = {
 export type MembershipCommandResult< T > =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: MembershipCommandError };
+
+/**
+ * Audit entry accepted by the D4 seam. Correlation fields are additive in
+ * Stage 2.4: the acting operator's organization scopes the audit record for
+ * organization-scoped reads (D2.4-2).
+ */
+export type AuditAppend = (entry: {
+  actorId: string;
+  action: string;
+  targetType: "membership" | "team";
+  targetId: string;
+  /** Org scope for organization-scoped audit reads (D2.4-2). */
+  organizationId?: string | null;
+  metadata?: Record<string, unknown>;
+  correlationId?: string | null;
+  causationId?: string | null;
+}) => Promise<void>;
+
+/**
+ * Transaction-scoped membership mutations + audit append (D2.4-1 Option A).
+ * The membership mutation and its audit record run on the SAME database
+ * transaction: a crash before COMMIT rolls back both, and a successful
+ * mutation cannot commit without its audit record. Implementations MUST NOT
+ * commit or roll back inside `appendAudit` — transaction ownership stays with
+ * `runInTransaction`.
+ */
+export interface MembershipTransaction {
+  insertTeam(input: { orgId: string; slug: string; name: string }): Promise<TeamRecord>;
+  updateTeamStatus(teamId: string, status: "archived"): Promise<TeamRecord>;
+  insertOrgMembership(input: {
+    operatorId: string;
+    organizationId?: string;
+    teamId?: string;
+    role?: OperatorRole;
+    grantedBy?: string;
+  }): Promise<MembershipRecord>;
+  updateMembershipStatus(
+    id: string,
+    status: MembershipStatus,
+    revokedAt: Date | null,
+  ): Promise<MembershipRecord>;
+  appendAudit(entry: Parameters<AuditAppend>[0]): Promise<void>;
+}
 
 /** Durable membership/team state port. */
 export interface MembershipRepository {
@@ -184,19 +229,23 @@ export interface MembershipRepository {
   ): Promise<MembershipRecord>;
   listMembershipsForOrg(orgId: string, includeRevoked: boolean): Promise<MembershipRecord[]>;
   listTeamAssignments(teamId: string, includeRevoked: boolean): Promise<MembershipRecord[]>;
+  /**
+   * D2.4-1: run `work` inside ONE database transaction whose scoped view is
+   * `MembershipTransaction`. Optional so lightweight fakes can omit it; the
+   * production Drizzle implementation ALWAYS provides it, and the membership
+   * service uses the transaction path whenever it exists so a security-
+   * critical mutation can never commit without its audit record.
+   */
+  runInTransaction?<T>(work: (tx: MembershipTransaction) => Promise<T>): Promise<T>;
 }
 
 /**
- * D4 audit seam (NOT implemented in Stage 2.2). Composition roots inject the
- * admin-audit append; the default is an explicit no-op stub.
+ * D4 audit seam. Stage 2.2 shipped it as an explicit no-op stub; Stage 2.4
+ * wires the real admin-audit append at composition roots. Mutating commands
+ * prefer the transaction-scoped path (`MembershipRepository.runInTransaction`
+ * + `MembershipTransaction.appendAudit`) per approved D2.4-1 Option A; this
+ * standalone seam remains for repositories without transaction support.
  */
-export type AuditAppend = (entry: {
-  actorId: string;
-  action: string;
-  targetType: "membership" | "team";
-  targetId: string;
-  metadata?: Record<string, unknown>;
-}) => Promise<void>;
 
 /** Identity kinds re-exported for consumers (single source: @stratifit/auth). */
 export type { AudienceIdentity, Identity, OperatorIdentity };

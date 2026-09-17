@@ -23,10 +23,12 @@ import {
 } from "@stratifit/database";
 import type { OperatorRole } from "@stratifit/auth";
 import type {
+  AuditAppend,
   IdentityRepository,
   MembershipRecord,
   MembershipRepository,
   MembershipStatus,
+  MembershipTransaction,
   OperatorAuthorizationLookup,
   TeamRecord,
 } from "./types";
@@ -181,10 +183,84 @@ const toTeam = (row: TeamRow): TeamRecord => ({
   status: row.status as TeamRecord["status"],
 });
 
+/**
+ * D2.4-1: the four mutating operations parameterized by executor so they can
+ * run against the root connection OR a transaction connection — identical SQL
+ * either way. The audit row is appended by the injected `auditWriter` on the
+ * SAME transaction connection (see runInTransaction).
+ */
+const mutationsFor = (exec: Database) => ({
+  insertTeam: async (input: { orgId: string; slug: string; name: string }): Promise<TeamRecord> => {
+    const [row] = await exec.insert(teams).values(input).returning();
+    if (!row) throw new Error("team insert returned no row");
+    return toTeam(row);
+  },
+  updateTeamStatus: async (teamId: string, status: "archived"): Promise<TeamRecord> => {
+    const [row] = await exec
+      .update(teams)
+      .set({ status, updatedAt: new Date() })
+      .where(eq(teams.id, teamId))
+      .returning();
+    if (!row) throw new Error("team status update returned no row");
+    return toTeam(row);
+  },
+  insertOrgMembership: async (
+    input: {
+      operatorId: string;
+      organizationId?: string;
+      teamId?: string;
+      role?: OperatorRole;
+      grantedBy?: string;
+    },
+  ): Promise<MembershipRecord> => {
+    const values =
+      input.teamId !== undefined
+        ? {
+            operatorId: input.operatorId,
+            teamId: input.teamId,
+            grantedBy: input.grantedBy,
+          }
+        : {
+            operatorId: input.operatorId,
+            organizationId: input.organizationId as string,
+            role: input.role as string,
+            grantedBy: input.grantedBy,
+          };
+    const [row] = await exec.insert(orgMemberships).values(values).returning();
+    if (!row) throw new Error("membership insert returned no row");
+    return toMembership(row);
+  },
+  updateMembershipStatus: async (
+    id: string,
+    status: MembershipStatus,
+    revokedAt: Date | null,
+  ): Promise<MembershipRecord> => {
+    const [row] = await exec
+      .update(orgMemberships)
+      .set({ status, revokedAt, updatedAt: new Date() })
+      .where(eq(orgMemberships.id, id))
+      .returning();
+    if (!row) throw new Error("membership status update returned no row");
+    return toMembership(row);
+  },
+});
+
+export interface DrizzleMembershipRepositoryDeps {
+  db?: Database;
+  databaseUrl?: string;
+  /**
+   * D2.4-1 (required): the admin-audit transaction writer (structural type;
+   * composition roots pass `createAdminAuditService(...).transactionWriter()`).
+   * Security-critical mutations cannot commit without their audit record.
+   */
+  auditWriter: { appendWithin(tx: Database, entry: Parameters<AuditAppend>[0]): Promise<void> };
+}
+
 export const createDrizzleMembershipRepository = (
-  deps: { db?: Database; databaseUrl?: string } = {},
+  deps: DrizzleMembershipRepositoryDeps,
 ): MembershipRepository => {
   const db = deps.db ?? createDatabase(deps.databaseUrl as string);
+  const direct = mutationsFor(db);
 
   return {
     async findOperatorById(id) {
@@ -219,21 +295,9 @@ export const createDrizzleMembershipRepository = (
       return row ? toTeam(row) : null;
     },
 
-    async insertTeam(input) {
-      const [row] = await db.insert(teams).values(input).returning();
-      if (!row) throw new Error("team insert returned no row");
-      return toTeam(row);
-    },
+    insertTeam: (input) => direct.insertTeam(input),
 
-    async updateTeamStatus(teamId, status) {
-      const [row] = await db
-        .update(teams)
-        .set({ status, updatedAt: new Date() })
-        .where(eq(teams.id, teamId))
-        .returning();
-      if (!row) throw new Error("team status update returned no row");
-      return toTeam(row);
-    },
+    updateTeamStatus: (teamId, status) => direct.updateTeamStatus(teamId, status),
 
     async listTeamsByOrg(orgId) {
       const rows = await db
@@ -285,34 +349,9 @@ export const createDrizzleMembershipRepository = (
       return row ? toMembership(row) : null;
     },
 
-    async insertOrgMembership(input) {
-      const values =
-        input.teamId !== undefined
-          ? {
-              operatorId: input.operatorId,
-              teamId: input.teamId,
-              grantedBy: input.grantedBy,
-            }
-          : {
-              operatorId: input.operatorId,
-              organizationId: input.organizationId as string,
-              role: input.role as string,
-              grantedBy: input.grantedBy,
-            };
-      const [row] = await db.insert(orgMemberships).values(values).returning();
-      if (!row) throw new Error("membership insert returned no row");
-      return toMembership(row);
-    },
+    insertOrgMembership: (input) => direct.insertOrgMembership(input),
 
-    async updateMembershipStatus(id, status, revokedAt) {
-      const [row] = await db
-        .update(orgMemberships)
-        .set({ status, revokedAt, updatedAt: new Date() })
-        .where(eq(orgMemberships.id, id))
-        .returning();
-      if (!row) throw new Error("membership status update returned no row");
-      return toMembership(row);
-    },
+    updateMembershipStatus: (id, status, revokedAt) => direct.updateMembershipStatus(id, status, revokedAt),
 
     async listMembershipsForOrg(orgId, includeRevoked) {
       const rows = await db
@@ -325,9 +364,7 @@ export const createDrizzleMembershipRepository = (
         )
         .orderBy(desc(orgMemberships.grantedAt));
       return rows.map(toMembership);
-    },
-
-    async listTeamAssignments(teamId, includeRevoked) {
+    },    async listTeamAssignments(teamId, includeRevoked) {
       const rows = await db
         .select()
         .from(orgMemberships)
@@ -337,7 +374,29 @@ export const createDrizzleMembershipRepository = (
             : and(eq(orgMemberships.teamId, teamId), ne(orgMemberships.status, "revoked")),
         )
         .orderBy(desc(orgMemberships.grantedAt));
+
       return rows.map(toMembership);
     },
+
+    /**
+     * D2.4-1 Option A: the membership mutation and its audit record run on the
+     * SAME transaction connection — a crash before COMMIT rolls back both, and
+     * the mutation cannot commit without its audit row. The audit INSERT is
+     * delegated to the injected admin-audit writer (structural type), which
+     * executes on `tx` and never commits.
+     */
+    runInTransaction: async <T>(work: (tx: MembershipTransaction) => Promise<T>): Promise<T> =>
+      db.transaction(async (trx) => {
+        const exec = trx as unknown as Database;
+        const mutations = mutationsFor(exec);
+        const scoped: MembershipTransaction = {
+          insertTeam: (input) => mutations.insertTeam(input),
+          updateTeamStatus: (teamId, status) => mutations.updateTeamStatus(teamId, status),
+          insertOrgMembership: (input) => mutations.insertOrgMembership(input),
+          updateMembershipStatus: (id, status, revokedAt) => mutations.updateMembershipStatus(id, status, revokedAt),
+          appendAudit: (entry) => deps.auditWriter.appendWithin(exec, entry),
+        };
+        return work(scoped);
+      }),
   };
 };

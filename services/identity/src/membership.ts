@@ -1,10 +1,17 @@
 /**
- * Membership & teams service (Stage 2.2, approved decisions D-1..D-5).
+ * Membership & teams service (Stage 2.2 decisions D-1..D-5; Stage 2.4 D2.4-1).
  *
  * Commands enforce, in order: capability (`admin.permissions`) -> actor
  * authority -> target/state validity -> invariant checks -> persistence ->
- * post-commit event publication (Stage-1 semantics) -> D4 audit seam (no-op
- * stub until admin-audit exists).
+ * post-commit event publication (Stage-1 semantics).
+ *
+ * D2.4-1 (Option A): every security-critical mutation and its audit record
+ * commit inside the SAME database transaction via
+ * `MembershipRepository.runInTransaction` — a crash before COMMIT rolls back
+ * BOTH, and a successful mutation cannot commit without its audit record.
+ * Repositories without transaction support fall back to the Stage-2.2
+ * sequential seam (persist -> standalone audit), the documented pre-2.4
+ * behavior. Domain events are always published AFTER commit.
  *
  * D-3: team assignments structurally carry no role/authorization. D-1:
  * org-scoped membership role is the sole authorization authority. History is
@@ -22,6 +29,7 @@ import type {
   MembershipRecord,
   MembershipRepository,
   MembershipStatus,
+  MembershipTransaction,
   TeamRecord,
 } from "./types";
 
@@ -36,8 +44,14 @@ export interface MembershipServiceDeps {
   repository: MembershipRepository;
   /** Defaults to an in-process publisher with no handlers (Stage-1 semantics). */
   publisher?: EventPublisher;
-  /** D4 seam; default is an explicit no-op until admin-audit is implemented. */
+  /** Fallback D4 seam (used only when the repository has no transaction support). */
   auditAppend?: AuditAppend;
+  /**
+   * TEST-ONLY: permit the sequential (non-transactional) audit fallback for
+   * repositories without `runInTransaction`. Production composition roots
+   * never set it — there the service fail-closes instead (D2.4-1).
+   */
+  allowSequentialAudit?: boolean;
   eventIdFactory?: () => string;
 }
 
@@ -74,10 +88,12 @@ export interface MembershipService {
 
 export const ROLE_ACTION: ControlCapability = "admin.permissions";
 
+type AuditEntryInput = Parameters<AuditAppend>[0];
+
 export const createMembershipService = (deps: MembershipServiceDeps): MembershipService => {
   const repo = deps.repository;
   const publisher = deps.publisher ?? new InProcessEventPublisher();
-  const audit = deps.auditAppend ?? (async () => {});
+  const fallbackAudit = deps.auditAppend ?? (async () => {});
   const nextEventId = deps.eventIdFactory ?? (() => randomUUID());
 
   const err = (reason: MembershipCommandErrorReason, message: string) => ({ ok: false as const, error: { reason, message } });
@@ -101,15 +117,69 @@ export const createMembershipService = (deps: MembershipServiceDeps): Membership
   };
 
   const auditEntry = (
-    actorId: string,
+    actor: MembershipActor,
     action: string,
     targetType: "membership" | "team",
     targetId: string,
     metadata?: Record<string, unknown>,
-  ) =>
-    metadata === undefined
-      ? audit({ actorId, action, targetType, targetId })
-      : audit({ actorId, action, targetType, targetId, metadata });
+  ): AuditEntryInput => ({
+    actorId: actor.operatorId,
+    action,
+    targetType,
+    targetId,
+    // D2.4-2: the acting operator's org scopes the audit record.
+    organizationId: actor.organizationId,
+    ...(metadata === undefined ? {} : { metadata }),
+    correlationId: actor.correlationId ?? null,
+    causationId: null,
+  });
+
+  /**
+   * D2.4-1 dispatch: run `run` (the mutation) and its audit append inside ONE
+   * database transaction when the repository supports it; otherwise use the
+   * sequential Stage-2.2 fallback. The audit record describes the persisted
+   * value, so `describe` sees the actual row after the mutation.
+   */
+  const persistAndAudit = async <T>(
+    actor: MembershipActor,
+    action: string,
+    targetType: "membership" | "team",
+    describe: (value: T) => { targetId: string; metadata?: Record<string, unknown> },
+    run: (tx: MembershipTransaction) => Promise<T>,
+  ): Promise<T> => {
+    if (repo.runInTransaction) {
+      return repo.runInTransaction(async (tx) => {
+        const value = await run(tx);
+        const { targetId, metadata } = describe(value);
+        await tx.appendAudit(auditEntry(actor, action, targetType, targetId, metadata));
+        return value;
+      });
+    }
+    // D2.4-1: production repositories implement runInTransaction, so mutation
+    // + audit ALWAYS commit atomically. The sequential fallback exists solely
+    // for isolated test fakes and must be enabled explicitly (test-only flag);
+    // production composition roots never set it. Fail closed otherwise — a
+    // mutation must never commit without its required audit record.
+    if (deps.allowSequentialAudit !== true) {
+      throw new Error(
+        "D2.4-1 violation: repository does not implement runInTransaction; " +
+          "membership mutations cannot commit without a same-transaction audit " +
+          "record. (The sequential audit fallback is test-only and must be " +
+          "enabled explicitly via allowSequentialAudit.)",
+      );
+    }
+    const fallbackTx: MembershipTransaction = {
+      insertTeam: (input) => repo.insertTeam(input),
+      updateTeamStatus: (teamId, status) => repo.updateTeamStatus(teamId, status),
+      insertOrgMembership: (input) => repo.insertOrgMembership(input),
+      updateMembershipStatus: (id, status, revokedAt) => repo.updateMembershipStatus(id, status, revokedAt),
+      appendAudit: (entry) => fallbackAudit(entry),
+    };
+    const value = await run(fallbackTx);
+    const { targetId, metadata } = describe(value);
+    await fallbackAudit(auditEntry(actor, action, targetType, targetId, metadata));
+    return value;
+  };
 
   return {
     async listTeams(actor) {
@@ -124,9 +194,15 @@ export const createMembershipService = (deps: MembershipServiceDeps): Membership
       }
       const existing = await repo.findTeamBySlug(actor.organizationId, input.slug);
       if (existing) return err("invalid_request", `team slug '${input.slug}' already exists in this organization`);
-      const team = await repo.insertTeam({ orgId: actor.organizationId, slug: input.slug, name: input.name });
+
+      const team = await persistAndAudit<TeamRecord>(
+        actor,
+        "team.created",
+        "team",
+        (t) => ({ targetId: t.id, metadata: { slug: t.slug } }),
+        (tx) => tx.insertTeam({ orgId: actor.organizationId, slug: input.slug, name: input.name }),
+      );
       await emit("team.created", { teamId: team.id, slug: team.slug, name: team.name }, actor.organizationId);
-      await auditEntry(actor.operatorId, "team.created", "team", team.id, { slug: team.slug });
       return { ok: true, value: team };
     },
 
@@ -136,9 +212,15 @@ export const createMembershipService = (deps: MembershipServiceDeps): Membership
       const team = await repo.findTeamById(teamId);
       if (!team || team.orgId !== actor.organizationId) return err("cross_org", "team does not belong to your organization");
       if (team.status === "archived") return err("invalid_transition", "team is already archived");
-      const updated = await repo.updateTeamStatus(teamId, "archived");
+
+      const updated = await persistAndAudit<TeamRecord>(
+        actor,
+        "team.archived",
+        "team",
+        (t) => ({ targetId: t.id, metadata: { slug: t.slug } }),
+        (tx) => tx.updateTeamStatus(teamId, "archived"),
+      );
       await emit("team.archived", { teamId: updated.id, slug: updated.slug }, actor.organizationId);
-      await auditEntry(actor.operatorId, "team.archived", "team", updated.id, { slug: updated.slug });
       return { ok: true, value: updated };
     },
 
@@ -189,21 +271,24 @@ export const createMembershipService = (deps: MembershipServiceDeps): Membership
         );
       }
 
-      const record = await repo.insertOrgMembership({
-        operatorId: input.operatorId,
-        organizationId: actor.organizationId,
-        role: input.role,
-        grantedBy: actor.operatorId,
-      });
+      const record = await persistAndAudit<MembershipRecord>(
+        actor,
+        "membership.granted",
+        "membership",
+        (r) => ({ targetId: r.id, metadata: { operatorId: r.operatorId, role: r.role } }),
+        (tx) =>
+          tx.insertOrgMembership({
+            operatorId: input.operatorId,
+            organizationId: actor.organizationId,
+            role: input.role,
+            grantedBy: actor.operatorId,
+          }),
+      );
       await emit(
         "membership.granted",
         { membershipId: record.id, operatorId: record.operatorId, role: record.role, scope: "organization" },
         actor.organizationId,
       );
-      await auditEntry(actor.operatorId, "membership.granted", "membership", record.id, {
-        operatorId: record.operatorId,
-        role: record.role,
-      });
       return { ok: true, value: record };
     },
 
@@ -231,20 +316,23 @@ export const createMembershipService = (deps: MembershipServiceDeps): Membership
       if (conflict) return err("membership_conflict", "operator already has a non-revoked assignment to this team");
 
       // D-3: team rows carry NO role (structurally impossible in the schema).
-      const record = await repo.insertOrgMembership({
-        operatorId: input.operatorId,
-        teamId: input.teamId,
-        grantedBy: actor.operatorId,
-      });
+      const record = await persistAndAudit<MembershipRecord>(
+        actor,
+        "membership.granted",
+        "membership",
+        (r) => ({ targetId: r.id, metadata: { operatorId: r.operatorId, teamId: r.teamId } }),
+        (tx) =>
+          tx.insertOrgMembership({
+            operatorId: input.operatorId,
+            teamId: input.teamId,
+            grantedBy: actor.operatorId,
+          }),
+      );
       await emit(
         "membership.granted",
         { membershipId: record.id, operatorId: record.operatorId, teamId: record.teamId, scope: "team" },
         actor.organizationId,
       );
-      await auditEntry(actor.operatorId, "membership.granted", "membership", record.id, {
-        operatorId: record.operatorId,
-        teamId: record.teamId,
-      });
       return { ok: true, value: record };
     },
 
@@ -275,16 +363,18 @@ export const createMembershipService = (deps: MembershipServiceDeps): Membership
         return err("invalid_transition", `cannot move membership from ${membership.status} to ${input.status}`);
       }
 
-      const updated = await repo.updateMembershipStatus(input.membershipId, input.status, null);
+      const updated = await persistAndAudit<MembershipRecord>(
+        actor,
+        "membership.updated",
+        "membership",
+        (r) => ({ targetId: r.id, metadata: { from: membership.status, to: r.status } }),
+        (tx) => tx.updateMembershipStatus(input.membershipId, input.status, null),
+      );
       await emit(
         "membership.updated",
         { membershipId: updated.id, operatorId: updated.operatorId, status: updated.status, previousStatus: membership.status },
         actor.organizationId,
       );
-      await auditEntry(actor.operatorId, "membership.updated", "membership", updated.id, {
-        from: membership.status,
-        to: updated.status,
-      });
       return { ok: true, value: updated };
     },
 
@@ -306,15 +396,18 @@ export const createMembershipService = (deps: MembershipServiceDeps): Membership
       if (!scopeOrg || scopeOrg !== actor.organizationId) return err("cross_org", "membership is outside your organization");
       if (membership.status === "revoked") return err("invalid_transition", "membership is already revoked");
 
-      const updated = await repo.updateMembershipStatus(membershipId, "revoked", new Date());
+      const updated = await persistAndAudit<MembershipRecord>(
+        actor,
+        "membership.revoked",
+        "membership",
+        (r) => ({ targetId: r.id, metadata: { operatorId: r.operatorId } }),
+        (tx) => tx.updateMembershipStatus(membershipId, "revoked", new Date()),
+      );
       await emit(
         "membership.revoked",
         { membershipId: updated.id, operatorId: updated.operatorId, role: updated.role, teamId: updated.teamId },
         actor.organizationId,
       );
-      await auditEntry(actor.operatorId, "membership.revoked", "membership", updated.id, {
-        operatorId: updated.operatorId,
-      });
       return { ok: true, value: updated };
     },
   };

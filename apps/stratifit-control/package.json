@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@stratifit/admin-audit": "workspace:*",
     "@stratifit/ai": "workspace:*",
     "@stratifit/auth": "workspace:*",
     "@stratifit/compute": "workspace:*",

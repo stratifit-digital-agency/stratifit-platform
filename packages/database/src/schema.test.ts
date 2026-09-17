@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { getTableColumns } from "drizzle-orm";
 import * as schemaExports from "./schema";
 import {
+  auditLog,
   audienceUsers,
   operators,
   organizations,
@@ -27,6 +28,7 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
     );
     expect(exported.sort()).toEqual(
       [
+        "auditLog",
         "audienceUsers",
         "operators",
         "organizations",
@@ -126,6 +128,27 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
     expect(policies.join("\n")).not.toMatch(/TO (anon|authenticated|service_role|PUBLIC)\b/);
   });
 
+  it("audit_log: append-only shape (no updatedAt column), nullable platform-level org_id", () => {
+    const c = getTableColumns(auditLog);
+    expect(Object.keys(c).sort()).toEqual(
+      [
+        "action",
+        "actorId",
+        "causationId",
+        "correlationId",
+        "id",
+        "occurredAt",
+        "organizationId",
+        "payload",
+        "subjectId",
+        "subjectKind",
+      ].sort(),
+    );
+    // Immutability at the schema level: no updated_at column exists.
+    expect("updatedAt" in c).toBe(false);
+    expect(c.organizationId.notNull).toBe(false);
+  });
+
   it("platform_config remains exactly the approved foundational shape", () => {
     const cols = Object.keys(getTableColumns(platformConfig)).sort();
     expect(cols).toEqual(["createdAt", "id", "key", "updatedAt", "value"]);
@@ -133,22 +156,26 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
 });
 
 /**
- * Stage 2.2 approved least-privilege posture (Option A): runtime privileges
+ * Stage 2.2/2.4 approved least-privilege posture (Option A): runtime privileges
  * are EXPLICIT and allowlisted per table; no blanket default privilege exists.
  * These guards make accidental reintroduction fail clearly:
  *   - migration content: platform_config is revoked and never re-granted;
  *   - the static net effect of all GRANT/REVOKE statements to stratifit_runtime
- *     equals the explicit allowlist (six tenancy tables, arwd each);
+ *     equals this per-table privilege map;
+ *   - audit_log is append-only: INSERT + SELECT, NEVER UPDATE/DELETE
+ *     (Decision 4 — no grant and no RLS policy may introduce them);
  *   - the stratifit_app default table privilege to stratifit_runtime is gone.
  */
-const RUNTIME_TABLE_ALLOWLIST = [
-  "audience_users",
-  "operators",
-  "org_memberships",
-  "organizations",
-  "teams",
-  "verification_requirements",
-] as const;
+const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
+  audience_users: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  operators: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  org_memberships: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  organizations: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  teams: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  verification_requirements: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  // Decision 4: append-only audit trail. UPDATE/DELETE must never be granted.
+  audit_log: ["INSERT", "SELECT"],
+};
 
 describe("runtime privilege posture (approved least-privilege)", () => {
   const migrationsDir = fileURLToPath(new URL("../drizzle/", import.meta.url));
@@ -212,12 +239,33 @@ describe("runtime privilege posture (approved least-privilege)", () => {
     // Tables whose net privilege set is empty (e.g. platform_config:
     // revoked in 0006, never granted) carry no access and are excluded.
     const names = [...privs.entries()].filter(([, set]) => set.size > 0).map(([t]) => t).sort();
-    expect(names).toEqual([...RUNTIME_TABLE_ALLOWLIST].sort());
-    for (const table of RUNTIME_TABLE_ALLOWLIST) {
-      expect([...(privs.get(table) ?? [])].sort()).toEqual(["DELETE", "INSERT", "SELECT", "UPDATE"]);
+    expect(names).toEqual(Object.keys(RUNTIME_PRIVILEGE_MAP).sort());
+    for (const [table, expected] of Object.entries(RUNTIME_PRIVILEGE_MAP)) {
+      expect([...(privs.get(table) ?? [])].sort()).toEqual([...expected].sort());
     }
     // platform_config: revoked in 0006, never granted — net privilege set is empty.
     expect([...(privs.get("platform_config") ?? [])]).toEqual([]);
+  });
+
+  it("audit_log is append-only: net runtime privileges are INSERT+SELECT, never UPDATE/DELETE", () => {
+    const auditGrants = migrationText().flatMap((t) =>
+      uncommented(t).match(/GRANT [^;]*ON TABLE public\.audit_log[^;]*TO stratifit_runtime/g) ?? [],
+    );
+    expect(auditGrants.join("\n")).toContain(
+      "GRANT INSERT, SELECT ON TABLE public.audit_log TO stratifit_runtime",
+    );
+    for (const g of auditGrants) expect(g).not.toMatch(/\b(UPDATE|DELETE)\b/);
+  });
+
+  it("audit_log has no UPDATE or DELETE RLS policy in any migration", () => {
+    const policies = migrationText().flatMap((t) =>
+      uncommented(t).match(/CREATE POLICY [^;]*ON public\.audit_log[^;]*;/g) ?? [],
+    );
+    expect(policies.length).toBeGreaterThanOrEqual(2);
+    for (const p of policies) {
+      expect(p).toContain("TO stratifit_runtime");
+      expect(p).not.toMatch(/FOR UPDATE|FOR DELETE/);
+    }
   });
 
   it("no default-privilege statement re-grants stratifit_runtime table access", () => {

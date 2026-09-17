@@ -3,6 +3,7 @@ import {
   boolean,
   check,
   index,
+  jsonb,
   pgTable,
   text,
   timestamp,
@@ -246,3 +247,39 @@ export type OrgMembershipRow = typeof orgMemberships.$inferSelect;
 export type NewOrgMembershipRow = typeof orgMemberships.$inferInsert;
 export type PlatformConfigRow = typeof platformConfig.$inferSelect;
 export type NewPlatformConfigRow = typeof platformConfig.$inferInsert;
+export type AuditLogRow = typeof auditLog.$inferSelect;
+export type NewAuditLogRow = typeof auditLog.$inferInsert;
+
+/**
+ * Append-only audit trail (SERVICE_ARCHITECTURE section 11; Decision 4).
+ *
+ * Conceptual owner: services/admin-audit — the ONLY sanctioned writer via
+ * `admin-audit.append`. Rows are immutable by construction: no updated_at
+ * column, and the runtime role receives INSERT + SELECT privileges only
+ * (migration 0009) with no UPDATE/DELETE RLS policies. `actor_id`/`subject_id`
+ * deliberately carry no cross-module FK (D2). `payload` holds opaque,
+ * secret-free before/after snapshots and correlation fields per DM section 38.
+ */
+export const auditLog = pgTable(
+  "audit_log",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    actorId: uuid("actor_id").notNull(),
+    action: text("action").notNull(),
+    subjectKind: text("subject_kind").notNull(),
+    subjectId: uuid("subject_id").notNull(),
+    /** Null only for platform-level actions (D1 infrastructure carve-out). */
+    organizationId: uuid("organization_id"),
+    correlationId: text("correlation_id"),
+    causationId: text("causation_id"),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("audit_log_action_check", sql`${t.action} <> ''`),
+    check("audit_log_subject_kind_check", sql`${t.subjectKind} <> ''`),
+    index("idx_audit_log_org_time").on(t.organizationId, t.occurredAt.desc()),
+    index("idx_audit_log_subject").on(t.subjectKind, t.subjectId),
+    index("idx_audit_log_actor_time").on(t.actorId, t.occurredAt.desc()),
+  ],
+).enableRLS();

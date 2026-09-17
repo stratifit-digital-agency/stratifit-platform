@@ -5,6 +5,7 @@ import type {
   MembershipActor,
   MembershipRecord,
   MembershipRepository,
+  MembershipTransaction,
   TeamRecord,
 } from "./types";
 
@@ -92,7 +93,7 @@ const captureEvents = () => {
 
 describe("capability gating", () => {
   it("denies every mutating command without admin.permissions (fail closed)", async () => {
-    const svc = createMembershipService({ repository: repoMock() });
+    const svc = createMembershipService({ repository: repoMock(), allowSequentialAudit: true });
     const weak = actor({ roles: ["viewer"], capabilities: ["audit.read"] });
     await expect(svc.createTeam(weak, { slug: "a", name: "A" })).resolves.toMatchObject({ ok: false, error: { reason: "missing_capability" } });
     await expect(svc.archiveTeam(weak, "team-1")).resolves.toMatchObject({ ok: false, error: { reason: "missing_capability" } });
@@ -108,7 +109,7 @@ describe("cross-org denial", () => {
   it("denies commands on operators outside the actor's organization", async () => {
     const repo = repoMock();
     vi.mocked(repo.findOperatorById).mockResolvedValue({ id: "op-foreign", orgId: "org-OTHER", status: "active" });
-    const svc = createMembershipService({ repository: repo });
+    const svc = createMembershipService({ repository: repo, allowSequentialAudit: true });
     await expect(svc.grantOrgMembership(actor(), { operatorId: "op-foreign", role: "viewer" })).resolves.toMatchObject({ ok: false, error: { reason: "cross_org" } });
     await expect(svc.grantTeamAssignment(actor(), { operatorId: "op-foreign", teamId: "team-1" })).resolves.toMatchObject({ ok: false, error: { reason: "cross_org" } });
   });
@@ -116,7 +117,7 @@ describe("cross-org denial", () => {
   it("denies team commands on teams outside the actor's organization", async () => {
     const repo = repoMock();
     vi.mocked(repo.findTeamById).mockResolvedValue(team({ orgId: "org-OTHER" }));
-    const svc = createMembershipService({ repository: repo });
+    const svc = createMembershipService({ repository: repo, allowSequentialAudit: true });
     await expect(svc.archiveTeam(actor(), "team-1")).resolves.toMatchObject({ ok: false, error: { reason: "cross_org" } });
     await expect(svc.grantTeamAssignment(actor(), { operatorId: "op-target", teamId: "team-1" })).resolves.toMatchObject({ ok: false, error: { reason: "cross_org" } });
     await expect(svc.listTeamAssignments(actor(), "team-1", {})).resolves.toMatchObject({ ok: false, error: { reason: "cross_org" } });
@@ -125,7 +126,7 @@ describe("cross-org denial", () => {
   it("denies membership status changes on memberships outside the actor's organization", async () => {
     const repo = repoMock();
     vi.mocked(repo.findMembershipById).mockResolvedValue(membership({ organizationId: "org-OTHER" }));
-    const svc = createMembershipService({ repository: repo });
+    const svc = createMembershipService({ repository: repo, allowSequentialAudit: true });
     await expect(svc.changeMembershipStatus(actor(), { membershipId: "m-1", status: "suspended" })).resolves.toMatchObject({ ok: false, error: { reason: "cross_org" } });
     await expect(svc.revokeMembership(actor(), "m-1")).resolves.toMatchObject({ ok: false, error: { reason: "cross_org" } });
   });
@@ -134,14 +135,14 @@ describe("cross-org denial", () => {
     const repo = repoMock();
     vi.mocked(repo.findMembershipById).mockResolvedValue(membership({ organizationId: null, teamId: "team-1", role: null }));
     vi.mocked(repo.findTeamById).mockResolvedValue(team({ orgId: "org-OTHER" }));
-    const svc = createMembershipService({ repository: repo });
+    const svc = createMembershipService({ repository: repo, allowSequentialAudit: true });
     await expect(svc.changeMembershipStatus(actor(), { membershipId: "m-1", status: "suspended" })).resolves.toMatchObject({ ok: false, error: { reason: "cross_org" } });
   });
 });
 
 describe("privilege-escalation guards", () => {
   it("rejects self-grant, self-status-change, and self-revocation", async () => {
-    const svc = createMembershipService({ repository: repoMock() });
+    const svc = createMembershipService({ repository: repoMock(), allowSequentialAudit: true });
     const self = actor({ operatorId: "op-target" });
     await expect(svc.grantOrgMembership(self, { operatorId: "op-target", role: "viewer" })).resolves.toMatchObject({ ok: false, error: { reason: "self_grant" } });
     await expect(svc.grantTeamAssignment(self, { operatorId: "op-target", teamId: "team-1" })).resolves.toMatchObject({ ok: false, error: { reason: "self_grant" } });
@@ -150,7 +151,7 @@ describe("privilege-escalation guards", () => {
   });
 
   it("rejects granting a role above the actor's rank", async () => {
-    const svc = createMembershipService({ repository: repoMock() });
+    const svc = createMembershipService({ repository: repoMock(), allowSequentialAudit: true });
     const op = actor({ roles: ["operator"], capabilities: ["admin.permissions"] });
     await expect(svc.grantOrgMembership(op, { operatorId: "op-target", role: "admin" })).resolves.toMatchObject({ ok: false, error: { reason: "role_escalation" } });
     const reviewer = actor({ roles: ["reviewer"], capabilities: ["admin.permissions"] });
@@ -158,7 +159,7 @@ describe("privilege-escalation guards", () => {
   });
 
   it("rejects a non-admin minting an admin even when ranks tie", async () => {
-    const svc = createMembershipService({ repository: repoMock() });
+    const svc = createMembershipService({ repository: repoMock(), allowSequentialAudit: true });
     const rogueAdmin = actor({ roles: ["operator"], capabilities: ["admin.permissions"] });
     await expect(svc.grantOrgMembership(rogueAdmin, { operatorId: "op-target", role: "admin" })).resolves.toMatchObject({ ok: false, error: { reason: "role_escalation" } });
   });
@@ -175,7 +176,7 @@ describe("grant semantics", () => {
     const repo = repoMock();
     const { publisher, seen } = captureEvents();
     const audit = vi.fn(async () => {});
-    const svc = createMembershipService({ repository: repo, publisher, auditAppend: audit });
+    const svc = createMembershipService({ repository: repo, publisher, auditAppend: audit, allowSequentialAudit: true });
     const result = await svc.grantOrgMembership(actor({ roles: ["admin"] }), { operatorId: "op-target", role: "operator" });
     expect(result).toMatchObject({ ok: true, value: { role: "operator", organizationId: ORG } });
     expect(seen).toEqual([
@@ -191,21 +192,21 @@ describe("grant semantics", () => {
   it("rejects a grant when a non-revoked membership already exists (conflict)", async () => {
     const repo = repoMock();
     vi.mocked(repo.findNonRevokedOrgMembership).mockResolvedValue(membership());
-    const svc = createMembershipService({ repository: repo });
+    const svc = createMembershipService({ repository: repo, allowSequentialAudit: true });
     await expect(svc.grantOrgMembership(actor(), { operatorId: "op-target", role: "viewer" })).resolves.toMatchObject({ ok: false, error: { reason: "membership_conflict" } });
   });
 
   it("rejects grants when the organization is not active (fail closed)", async () => {
     const repo = repoMock();
     vi.mocked(repo.findOrganizationStatus).mockResolvedValue("suspended");
-    const svc = createMembershipService({ repository: repo });
+    const svc = createMembershipService({ repository: repo, allowSequentialAudit: true });
     await expect(svc.grantOrgMembership(actor(), { operatorId: "op-target", role: "viewer" })).resolves.toMatchObject({ ok: false, error: { reason: "org_not_active" } });
   });
 
   it("rejects grants to inactive operators", async () => {
     const repo = repoMock();
     vi.mocked(repo.findOperatorById).mockResolvedValue({ id: "op-target", orgId: ORG, status: "suspended" });
-    const svc = createMembershipService({ repository: repo });
+    const svc = createMembershipService({ repository: repo, allowSequentialAudit: true });
     await expect(svc.grantOrgMembership(actor(), { operatorId: "op-target", role: "viewer" })).resolves.toMatchObject({ ok: false, error: { reason: "operator_not_active" } });
   });
 });
@@ -214,7 +215,7 @@ describe("team assignment semantics (D-3: assignment-only)", () => {
   it("inserts team rows WITHOUT any role and marks scope=team in the event", async () => {
     const repo = repoMock();
     const { publisher, seen } = captureEvents();
-    const svc = createMembershipService({ repository: repo, publisher });
+    const svc = createMembershipService({ repository: repo, publisher, allowSequentialAudit: true });
     const result = await svc.grantTeamAssignment(actor(), { operatorId: "op-target", teamId: "team-1" });
     expect(result).toMatchObject({ ok: true, value: { teamId: "team-1", role: null } });
     const insert = vi.mocked(repo.insertOrgMembership).mock.calls[0]?.[0];
@@ -229,27 +230,27 @@ describe("team assignment semantics (D-3: assignment-only)", () => {
   it("rejects team assignment on an archived team", async () => {
     const repo = repoMock();
     vi.mocked(repo.findTeamById).mockResolvedValue(team({ status: "archived" }));
-    const svc = createMembershipService({ repository: repo });
+    const svc = createMembershipService({ repository: repo, allowSequentialAudit: true });
     await expect(svc.grantTeamAssignment(actor(), { operatorId: "op-target", teamId: "team-1" })).resolves.toMatchObject({ ok: false, error: { reason: "team_not_active" } });
   });
 });
 
 describe("status transitions and append-and-revoke history", () => {
   it("permits only approved transitions", async () => {
-    const svc = createMembershipService({ repository: repoMock() });
+    const svc = createMembershipService({ repository: repoMock(), allowSequentialAudit: true });
     // The type system itself forbids 'revoked' via changeMembershipStatus:
     // @ts-expect-error revoked is excluded from the input type by design
     await expect(svc.changeMembershipStatus(actor(), { membershipId: "m-1", status: "revoked" })).resolves.toMatchObject({ ok: false });
     const repo = repoMock();
     vi.mocked(repo.findMembershipById).mockResolvedValue(membership({ status: "revoked", revokedAt: "2026-09-16T00:00:00.000Z" }));
-    const svc2 = createMembershipService({ repository: repo });
+    const svc2 = createMembershipService({ repository: repo, allowSequentialAudit: true });
     await expect(svc2.changeMembershipStatus(actor(), { membershipId: "m-1", status: "active" })).resolves.toMatchObject({ ok: false, error: { reason: "invalid_transition" } });
   });
 
   it("revocation sets revokedAt, emits membership.revoked, and re-grant then inserts a NEW row", async () => {
     const repo = repoMock();
     const { publisher, seen } = captureEvents();
-    const svc = createMembershipService({ repository: repo, publisher });
+    const svc = createMembershipService({ repository: repo, publisher, allowSequentialAudit: true });
     const revoked = await svc.revokeMembership(actor(), "m-1");
     expect(revoked).toMatchObject({ ok: true, value: { status: "revoked" } });
     expect(vi.mocked(repo.updateMembershipStatus).mock.calls[0]).toEqual(["m-1", "revoked", expect.any(Date)]);
@@ -266,7 +267,7 @@ describe("status transitions and append-and-revoke history", () => {
   it("refuses to mutate an already-revoked membership (immutable history)", async () => {
     const repo = repoMock();
     vi.mocked(repo.findMembershipById).mockResolvedValue(membership({ status: "revoked", revokedAt: "2026-09-16T00:00:00.000Z" }));
-    const svc = createMembershipService({ repository: repo });
+    const svc = createMembershipService({ repository: repo, allowSequentialAudit: true });
     await expect(svc.revokeMembership(actor(), "m-1")).resolves.toMatchObject({ ok: false, error: { reason: "invalid_transition" } });
   });
 });
@@ -274,7 +275,7 @@ describe("status transitions and append-and-revoke history", () => {
 describe("teams lifecycle", () => {
   it("creates a team with kebab-case slug validation and emits team.created", async () => {
     const { publisher, seen } = captureEvents();
-    const svc = createMembershipService({ repository: repoMock(), publisher });
+    const svc = createMembershipService({ repository: repoMock(), publisher, allowSequentialAudit: true });
     await expect(svc.createTeam(actor(), { slug: "Bad Slug", name: "X" })).resolves.toMatchObject({ ok: false, error: { reason: "invalid_request" } });
     const ok = await svc.createTeam(actor(), { slug: "alpha-team", name: "Alpha" });
     expect(ok).toMatchObject({ ok: true, value: { slug: "alpha-team" } });
@@ -285,8 +286,50 @@ describe("teams lifecycle", () => {
 
   it("archives a team and emits team.archived", async () => {
     const { publisher, seen } = captureEvents();
-    const svc = createMembershipService({ repository: repoMock(), publisher });
+    const svc = createMembershipService({ repository: repoMock(), publisher, allowSequentialAudit: true });
     await expect(svc.archiveTeam(actor(), "team-1")).resolves.toMatchObject({ ok: true, value: { status: "archived" } });
     expect(seen).toEqual([expect.objectContaining({ name: "team.archived" })]);
+  });
+});
+
+describe("D2.4-1 fail-closed guard", () => {
+  it("REFUSES to mutate when the repository lacks runInTransaction and the sequential fallback is not explicitly enabled", async () => {
+    const svc = createMembershipService({ repository: repoMock() }); // no allowSequentialAudit
+    await expect(svc.createTeam(actor(), { slug: "guard-team", name: "Guard" })).rejects.toThrow(
+      /D2\.4-1 violation/,
+    );
+    await expect(svc.grantOrgMembership(actor(), { operatorId: "op-target", role: "operator" })).rejects.toThrow(
+      /D2\.4-1 violation/,
+    );
+  });
+
+  it("prefers the same-transaction path when the repository implements runInTransaction, even with the test-only flag set", async () => {
+    const repo = repoMock();
+    let seqAuditCalls = 0;
+    let txCalls = 0;
+    const runInTransaction = async <T,>(
+      fn: (tx: MembershipTransaction) => Promise<T>,
+    ): Promise<T> => {
+      txCalls += 1;
+      return fn({
+        insertTeam: repo.insertTeam,
+        updateTeamStatus: repo.updateTeamStatus,
+        insertOrgMembership: repo.insertOrgMembership,
+        updateMembershipStatus: repo.updateMembershipStatus,
+        appendAudit: vi.fn(async () => {}),
+      });
+    };
+    const txRepo: MembershipRepository = { ...repo, runInTransaction };
+    const svc = createMembershipService({
+      repository: txRepo,
+      allowSequentialAudit: true, // flag set but must be irrelevant here
+      auditAppend: vi.fn(async () => {
+        seqAuditCalls += 1;
+      }),
+    });
+    const result = await svc.createTeam(actor(), { slug: "tx-team", name: "Tx" });
+    expect(result).toMatchObject({ ok: true });
+    expect(txCalls).toBe(1); // transaction port used
+    expect(seqAuditCalls).toBe(0); // sequential fallback never invoked
   });
 });

@@ -37,6 +37,12 @@ const elementTypes = [
   { type: "public-safe-fragment", pattern: "services/identity/src/public/**", mode: "full" },
   // Identity service (internal; owns durable identity state per Decision 3).
   { type: "identity-service", pattern: "services/identity/**", mode: "full" },
+  // Admin-audit service (internal; owns the audit_log family; Decision 4 — the
+  // sole sanctioned cross-module audit write path). Consumers inject the
+  // transaction-scoped writer structurally at composition roots; the
+  // D2.4-1 same-transaction live proof lives in services/identity, which is
+  // the module allowed to compose admin-audit (never the reverse).
+  { type: "audit-service", pattern: "services/admin-audit/**", mode: "full" },
   // Production domain — internal only. Publishing must NOT import it.
   { type: "internal-service", pattern: "services/production-engine/**", mode: "full" },
   // Public-safe domain services (published-content read API today).
@@ -107,11 +113,19 @@ export default [
               from: "public-service",
               allow: ["contracts", "public-package", "internal-package", "public-service"],
             },
-            // Identity service internals: contracts, packages, and its own
-            // public fragment; never the applications.
+            // Identity service internals: contracts, packages, its own public
+            // fragment, and the sanctioned admin-audit append path (all modules
+            // -> admin-audit for audit). Never the applications.
             {
               from: "identity-service",
-              allow: ["contracts", "public-package", "internal-package", "identity-service", "public-safe-fragment"],
+              allow: ["contracts", "public-package", "internal-package", "identity-service", "public-safe-fragment", "audit-service"],
+            },
+            // Admin-audit internals: contracts + packages only (pure Drizzle
+            // adapter; no service-to-service imports — the D2.4-1 writer is
+            // injected structurally at composition roots).
+            {
+              from: "audit-service",
+              allow: ["contracts", "public-package", "internal-package", "audit-service"],
             },
             // The public fragment may only see contracts, public-safe packages,
             // and its own module internals (which bring the database package).
@@ -129,6 +143,7 @@ export default [
                 "internal-service",
                 "public-service",
                 "identity-service",
+                "audit-service",
                 "public-safe-fragment",
                 "control-app",
               ],
@@ -138,9 +153,9 @@ export default [
             {
               from: "media-app",
               allow: ["contracts", "public-package", "public-service", "public-safe-fragment", "media-app"],
-              disallow: ["internal-package", "internal-service", "identity-service"],
+              disallow: ["internal-package", "internal-service", "identity-service", "audit-service"],
               message:
-                "Stratifit Media must not access internal production infrastructure (compute, AI, workflows, database, storage, production-engine) or identity-service internals — only the public-safe fragment.",
+                "Stratifit Media must not access internal production infrastructure (compute, AI, workflows, database, storage, production-engine), identity-service internals, or the admin-audit service — only the public-safe fragment.",
             },
           ],
         },
