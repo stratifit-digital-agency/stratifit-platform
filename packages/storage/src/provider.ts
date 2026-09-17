@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { SupabaseStorage } from "./supabase-adapter";
 
 /**
  * Object-storage abstraction. Large media binaries (videos, audio, renders,
@@ -85,6 +86,17 @@ export const createStorageFromEnv = (env: NodeJS.ProcessEnv = process.env): Stor
   const provider = env.STORAGE_PROVIDER ?? "local";
   if (provider === "local") {
     return new LocalDiskStorage(env.STORAGE_LOCAL_ROOT ?? ".data/storage");
+  }
+  if (provider === "supabase") {
+    // Stage 2.5 (decision D2.5-1): real Supabase Storage. The project URL may
+    // come from the public-safe NEXT_PUBLIC_SUPABASE_URL (a public project
+    // URL, NOT a credential); the service-role key is server-only and
+    // fail-closed when missing. SupabaseStorage validates and throws on
+    // incomplete configuration — never a silent local fallback.
+    const url = env.SUPABASE_URL?.trim() || env.NEXT_PUBLIC_SUPABASE_URL?.trim() || "";
+    const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY?.trim() ?? "";
+    const bucket = env.SUPABASE_STORAGE_BUCKET?.trim() ?? "";
+    return new SupabaseStorage({ url, serviceKey, bucket });
   }
   throw new Error(`unknown STORAGE_PROVIDER: ${provider}`);
 };
