@@ -5,7 +5,9 @@ import {
   index,
   integer,
   jsonb,
+  numeric,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -479,3 +481,209 @@ export const manifestVersions = pgTable(
     index("idx_manifest_versions_production").on(t.productionId),
   ],
 ).enableRLS();
+
+// ---------------------------------------------------------------------------
+// Job / Compute domain (Stage 2.7, approved decisions D2.7-1..D2.7-5)
+//
+// Conceptual owner: services/jobs (SVC section 11 context 9). Tenancy per D1:
+// org_id NOT NULL on every table. Cross-module rule (D2): the only FKs are
+// intra-family (job -> job) plus organizations; subjects (manifests,
+// generations, publications) are referenced by loose ID in their own
+// contexts. D2.7-4: no worker/lease tables; attempts are recorded immutably.
+// D2.7-5: these tables ARE the durable state — no outbox tables exist.
+// RLS enabled on all five; runtime grants are explicit per-table in
+// migration 0013 — arwd on the four mutable families, INSERT+SELECT only on
+// the immutable attempt history (the audit_log pattern).
+// ---------------------------------------------------------------------------
+
+/** D2.7-3: the complete documented job type catalog (DM section 16). */
+export const JOB_TYPES = [
+  "generation.execute",
+  "media.process",
+  "publication.deliver",
+  "notification.send",
+  "qc.run",
+] as const;
+
+/**
+ * Aggregate root 17 (DM section 16): one unit of executable work. Status
+ * carries the DM section 32 state machine 2 as an explicit CHECK (no
+ * invented states). Idempotency per invariant 7: UNIQUE (org, type, key) —
+ * retries dedupe on the key and duplicate enqueues resolve to the existing
+ * job.
+ */
+export const jobs = pgTable(
+  "jobs",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    jobType: text("job_type").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    /** Loose subject reference (what the work acts on) — no cross-module FK. */
+    subjectKind: text("subject_kind").notNull(),
+    subjectId: uuid("subject_id").notNull(),
+    /** Production manifest version ref (nullable — not every job has one). */
+    manifestRef: uuid("manifest_ref"),
+    computeRequirementId: uuid("compute_requirement_id"),
+    status: text("status").notNull().default("created"),
+    priority: integer("priority").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    progress: integer("progress").notNull().default(0),
+    lastError: text("last_error"),
+    /** Cancellation overlay (DM section 32.2) — observed at safe points. */
+    cancellationRequested: boolean("cancellation_requested").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "jobs_type_check",
+      sql`${t.jobType} in ('generation.execute', 'media.process', 'publication.deliver', 'notification.send', 'qc.run')`,
+    ),
+    check(
+      "jobs_status_check",
+      sql`${t.status} in ('created', 'queued', 'running', 'completed', 'failed', 'cancelled')`,
+    ),
+    check("jobs_max_attempts_check", sql`${t.maxAttempts} > 0`),
+    check("jobs_progress_check", sql`${t.progress} between 0 and 100`),
+    // Invariant 7: idempotency key is unique per org + type. Different orgs
+    // may reuse the same key; a duplicate enqueue resolves to this row.
+    unique("jobs_org_type_key_unique").on(t.orgId, t.jobType, t.idempotencyKey),
+    index("idx_jobs_org_status").on(t.orgId, t.status),
+    index("idx_jobs_org_subject").on(t.orgId, t.subjectKind, t.subjectId),
+  ],
+).enableRLS();
+
+/**
+ * DAG edges: job B starts after job A reaches a terminal state. Self
+ * dependency is forbidden at the schema level; cross-org edges and cycles
+ * are rejected in the service BEFORE insert (D2.7-4: no scheduler tables).
+ */
+export const jobDependencies = pgTable(
+  "job_dependencies",
+  {
+    jobId: uuid("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    dependsOnJobId: uuid("depends_on_job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("job_dependencies_no_self_check", sql`${t.jobId} <> ${t.dependsOnJobId}`),
+    // Same-org enforcement is a BEFORE-INSERT trigger (migration 0013):
+    // PostgreSQL does not allow subqueries in CHECK constraints, and both
+    // endpoints already share the org through their jobs FKs.
+    primaryKey({ name: "job_dependencies_pk", columns: [t.jobId, t.dependsOnJobId] }),
+    index("idx_job_dependencies_depends_on").on(t.dependsOnJobId),
+  ],
+).enableRLS();
+
+/**
+ * Append-only attempt history (DM section 16: "attempts are recorded
+ * immutably"). worker_ref is a platform-agnostic identity string — worker
+ * credentials are NEVER stored (invariant 4). Runtime privileges are
+ * INSERT+SELECT only (migration 0013): UPDATE/DELETE are unrepresentable.
+ */
+export const jobAttempts = pgTable(
+  "job_attempts",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    jobId: uuid("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    attemptNumber: integer("attempt_number").notNull(),
+    /** Platform-agnostic worker identity — never credentials (invariant 4). */
+    workerRef: text("worker_ref").notNull(),
+    allocationRef: text("allocation_ref"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    outcome: text("outcome"),
+    errorDetail: text("error_detail"),
+    /** Resume-support progress snapshots (DM section 16). */
+    progressSnapshot: jsonb("progress_snapshot").$type<Record<string, unknown>>().notNull().default({}),
+    usageRecordId: uuid("usage_record_id"),
+  },
+  (t) => [
+    check(
+      "job_attempts_outcome_check",
+      sql`${t.outcome} is null or ${t.outcome} in ('succeeded', 'failed', 'timed_out', 'cancelled')`,
+    ),
+    check("job_attempts_attempt_number_check", sql`${t.attemptNumber} > 0`),
+    unique("job_attempts_job_attempt_unique").on(t.jobId, t.attemptNumber),
+    index("idx_job_attempts_job").on(t.jobId),
+  ],
+).enableRLS();
+
+/**
+ * Pure estimate structure mirroring packages/compute ComputeAllocationRequest
+ * (DM section 16: "pure estimate structure") plus its org scope. No provider
+ * activation, no credentials — records only.
+ */
+export const computeRequirements = pgTable(
+  "compute_requirements",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    gpuClass: text("gpu_class").notNull(),
+    vramGb: integer("vram_gb").notNull(),
+    workers: integer("workers").notNull(),
+    concurrency: integer("concurrency").notNull(),
+    estimatedRuntimeSeconds: integer("estimated_runtime_seconds").notNull(),
+    storageMb: integer("storage_mb").notNull(),
+    estimatedCostUsd: numeric("estimated_cost_usd", { precision: 12, scale: 4 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "compute_requirements_positive_check",
+      sql`${t.vramGb} >= 0 and ${t.workers} > 0 and ${t.concurrency} > 0 and ${t.estimatedRuntimeSeconds} >= 0 and ${t.storageMb} >= 0`,
+    ),
+    index("idx_compute_requirements_org").on(t.orgId),
+  ],
+).enableRLS();
+
+/**
+ * Actuals captured against an allocation (DM section 16) so estimates improve
+ * against actuals over time. No provider credentials — references only.
+ */
+export const computeUsage = pgTable(
+  "compute_usage",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    allocationRef: text("allocation_ref").notNull(),
+    actualRuntimeSeconds: integer("actual_runtime_seconds").notNull(),
+    actualCostUsd: numeric("actual_cost_usd", { precision: 12, scale: 4 }).notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("compute_usage_positive_check", sql`${t.actualRuntimeSeconds} >= 0 and ${t.actualCostUsd} >= 0`),
+    index("idx_compute_usage_org").on(t.orgId),
+  ],
+).enableRLS();
+
+export type JobRow = typeof jobs.$inferSelect;
+export type NewJobRow = typeof jobs.$inferInsert;
+export type JobDependencyRow = typeof jobDependencies.$inferSelect;
+export type NewJobDependencyRow = typeof jobDependencies.$inferInsert;
+export type JobAttemptRow = typeof jobAttempts.$inferSelect;
+export type NewJobAttemptRow = typeof jobAttempts.$inferInsert;
+export type ComputeRequirementRow = typeof computeRequirements.$inferSelect;
+export type NewComputeRequirementRow = typeof computeRequirements.$inferInsert;
+export type ComputeUsageRow = typeof computeUsage.$inferSelect;
+export type NewComputeUsageRow = typeof computeUsage.$inferInsert;

@@ -9,9 +9,10 @@ import { afterAll, describe, expect, it } from "vitest";
  * against the LIVE remote:
  *   - stratifit_runtime has NO privileges on platform_config;
  *   - per-table privilege map: six tenancy tables + two mutable production
- *     aggregates = arwd; audit_log + the three immutable Stage 2.6 production
- *     version families = INSERT+SELECT only (append-only — UPDATE/DELETE must
- *     never exist);
+ *     aggregates + the four mutable Stage 2.7 job/compute families = arwd;
+ *     audit_log + the three immutable Stage 2.6 production version families +
+ *     the immutable Stage 2.7 job attempt history = INSERT+SELECT only
+ *     (append-only — UPDATE/DELETE must never exist);
  *   - the blanket stratifit_app default table privilege is gone (Option A);
  *   - role attributes (LOGIN-only, non-superuser, no CREATEDB/CREATEROLE/
  *     REPLICATION/BYPASSRLS) and zero ownership;
@@ -37,12 +38,21 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "verification_requirements",
     "projects",
     "productions",
+    "jobs",
+    "job_dependencies",
+    "compute_requirements",
+    "compute_usage",
   ] as const;
 
-  // Stage 2.6 immutable families (D2.6-4): INSERT + SELECT, never UPDATE/DELETE.
-  const immutableTables = ["production_plan_versions", "gate_decision_records", "manifest_versions"] as const;
+  // Immutable families (D2.6-4 / D2.7-4): INSERT + SELECT, never UPDATE/DELETE.
+  const immutableTables = [
+    "production_plan_versions",
+    "gate_decision_records",
+    "manifest_versions",
+    "job_attempts",
+  ] as const;
 
-  it("grants stratifit_runtime INSERT+SELECT only on the Stage 2.6 immutable families", async () => {
+  it("grants stratifit_runtime INSERT+SELECT only on the immutable families", async () => {
     const grants = await sql!`
       select table_name, string_agg(privilege_type, ',' order by privilege_type) as privs
       from information_schema.role_table_grants
@@ -81,6 +91,42 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     expect(
       [...byTable.keys()].sort().filter((t) => t !== "audit_log" && !(immutableTables as readonly string[]).includes(t)),
     ).toEqual(expectedArwd);
+  });
+
+  it("function EXECUTE surface: the two approved definer functions are runtime-executable and PUBLIC-locked", async () => {
+    // The Option-B functions (Stage 2.7 blocker resolution) are the ONLY
+    // functions the platform itself creates; the guard asserts their grant
+    // state (a widening or a lost REVOKE would fail here). Pre-existing
+    // legacy functions with default PUBLIC EXECUTE are out of scope for
+    // Stratifit's own posture (runtime role has no INHERIT from PUBLIC and
+    // no membership; verified separately by the privilege-map guard).
+    const [runtimeExec] = await sql!`
+      select count(*)::int as n
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'public'
+        and p.proname in ('close_job_attempt', 'record_job_attempt_progress')
+        and has_function_privilege('stratifit_runtime', p.oid, 'EXECUTE')`;
+    expect(runtimeExec!.n).toBe(2);
+    // PUBLIC must hold no EXECUTE on either (REVOKE ... FROM PUBLIC held).
+    for (const fn of ["close_job_attempt", "record_job_attempt_progress"]) {
+      const [fnRow] = await sql!`
+        select has_function_privilege('public', p.oid, 'EXECUTE') as public_execute
+        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public' and p.proname = ${fn}`;
+      expect(fnRow!.public_execute).toBe(false);
+    }
+    // Both must be SECURITY DEFINER owned by the migrator role with an
+    // empty search_path (hardening: no redirectable resolution).
+    const [posture] = await sql!`
+      select
+        bool_and(pg_get_userbyid(p.proowner) = 'stratifit_app') as owner_ok,
+        bool_and(p.prosecdef) as secdef_ok,
+        bool_and(p.proconfig::text like '%search_path=%') as searchpath_ok
+      from pg_proc p
+      where p.proname in ('close_job_attempt', 'record_job_attempt_progress')`;
+    expect(posture!.owner_ok).toBe(true);
+    expect(posture!.secdef_ok).toBe(true);
+    expect(posture!.searchpath_ok).toBe(true);
   });
 
   it("no stratifit_app default table privilege grants stratifit_runtime anything (Option A)", async () => {

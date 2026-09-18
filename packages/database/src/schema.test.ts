@@ -6,7 +6,12 @@ import * as schemaExports from "./schema";
 import {
   auditLog,
   audienceUsers,
+  computeRequirements,
+  computeUsage,
   gateDecisionRecords,
+  jobAttempts,
+  jobDependencies,
+  jobs,
   manifestVersions,
   operators,
   organizations,
@@ -29,13 +34,18 @@ import {
 describe("identity foundation (Stage 2.3, approved shape)", () => {
   it("exposes exactly the identity/tenancy tables plus platform_config", () => {
     const exported = Object.keys(schemaExports).filter(
-      (k) => !k.endsWith("Row") && !k.startsWith("New"),
+      (k) => !k.endsWith("Row") && !k.startsWith("New") && k !== "JOB_TYPES",
     );
     expect(exported.sort()).toEqual(
       [
         "auditLog",
         "audienceUsers",
+        "computeRequirements",
+        "computeUsage",
         "gateDecisionRecords",
+        "jobAttempts",
+        "jobDependencies",
+        "jobs",
         "manifestVersions",
         "operators",
         "organizations",
@@ -131,6 +141,11 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
       "production_plan_versions",
       "gate_decision_records",
       "manifest_versions",
+      "jobs",
+      "job_dependencies",
+      "job_attempts",
+      "compute_requirements",
+      "compute_usage",
     ]) {
       expect(sqlText).toContain(`ALTER TABLE "${table}" ENABLE ROW LEVEL SECURITY;`);
     }
@@ -198,6 +213,13 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   production_plan_versions: ["INSERT", "SELECT"],
   gate_decision_records: ["INSERT", "SELECT"],
   manifest_versions: ["INSERT", "SELECT"],
+  // Stage 2.7 (D2.7-5/D2.7-4): the four mutable job/compute families get full
+  // arwd; the attempt history is append-only — INSERT + SELECT only.
+  jobs: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  job_dependencies: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  compute_requirements: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  compute_usage: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  job_attempts: ["INSERT", "SELECT"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -317,6 +339,24 @@ describe("runtime privilege posture (approved least-privilege)", () => {
     expect(productionPolicies.length).toBeGreaterThanOrEqual(5);
     for (const p of productionPolicies) expect(p).toContain("TO stratifit_runtime");
   });
+
+  it("stage 2.7 job_attempts is append-only: net runtime privileges are INSERT+SELECT, never UPDATE/DELETE", () => {
+    const grants = migrationText().flatMap((t) =>
+      uncommented(t).match(/GRANT [^;]*ON TABLE public\.job_attempts[^;]*TO stratifit_runtime/g) ?? [],
+    );
+    expect(grants.length).toBeGreaterThan(0);
+    for (const g of grants) expect(g).not.toMatch(/\b(UPDATE|DELETE)\b/);
+  });
+
+  it("stage 2.7 job/compute tables are RLS-enabled with runtime-scoped policies only", () => {
+    const sqlText = migrationText().join("\n");
+    const policies = sqlText.match(/CREATE POLICY[^;]+;/g) ?? [];
+    const jobPolicies = policies.filter((p) =>
+      ["public.jobs", "public.job_dependencies", "public.job_attempts", "public.compute_requirements", "public.compute_usage"].some((t) => p.includes(`ON ${t}`)),
+    );
+    expect(jobPolicies.length).toBeGreaterThanOrEqual(5);
+    for (const p of jobPolicies) expect(p).toContain("TO stratifit_runtime");
+  });
 });
 
 describe("domain-table guard (per approved plan)", () => {
@@ -332,6 +372,10 @@ describe("domain-table guard (per approved plan)", () => {
       "conversations",
       "messages",
       "auditLogs",
+      "jobLeases",
+      "workerLeases",
+      "outboxEvents",
+      "eventOutbox",
     ];
     for (const name of forbidden) expect(exported).not.toContain(name);
   });
@@ -366,6 +410,67 @@ describe("domain-table guard (per approved plan)", () => {
     expect(p.orgId.notNull).toBe(true);
     expect(p.projectId.notNull).toBe(true);
     expect(p.status.notNull).toBe(true);
+  });
+
+  it("jobs: five-value type catalog, DM section 32 state machine, idempotency triple", () => {
+    const c = getTableColumns(jobs);
+    expect(Object.keys(c).sort()).toEqual(
+      [
+        "attemptCount",
+        "cancellationRequested",
+        "computeRequirementId",
+        "createdAt",
+        "id",
+        "idempotencyKey",
+        "jobType",
+        "lastError",
+        "manifestRef",
+        "maxAttempts",
+        "orgId",
+        "priority",
+        "progress",
+        "status",
+        "subjectId",
+        "subjectKind",
+        "updatedAt",
+      ],
+    );
+    expect(c.orgId.notNull).toBe(true);
+    expect(c.idempotencyKey.notNull).toBe(true);
+    expect(c.subjectKind.notNull).toBe(true);
+    expect(c.subjectId.notNull).toBe(true);
+    expect(c.manifestRef.notNull).toBe(false);
+    expect(c.computeRequirementId.notNull).toBe(false);
+    expect(c.status.notNull).toBe(true);
+  });
+
+  it("job_dependencies: composite PK, both FKs to jobs, no updatedAt", () => {
+    const c = getTableColumns(jobDependencies);
+    expect(Object.keys(c).sort()).toEqual(["createdAt", "dependsOnJobId", "jobId", "orgId"]);
+    expect(c.jobId.notNull).toBe(true);
+    expect(c.dependsOnJobId.notNull).toBe(true);
+  });
+
+  it("job_attempts: append-only shape (no updatedAt), worker_ref is a plain string", () => {
+    const c = getTableColumns(jobAttempts);
+    expect(Object.keys(c).sort()).toEqual(
+      ["allocationRef", "attemptNumber", "completedAt", "errorDetail", "id", "jobId", "orgId", "outcome", "progressSnapshot", "startedAt", "usageRecordId", "workerRef"],
+    );
+    // Immutability at the schema level: no updated_at column exists.
+    expect("updatedAt" in c).toBe(false);
+    expect(c.workerRef.notNull).toBe(true);
+    expect(c.attemptNumber.notNull).toBe(true);
+    expect(c.completedAt.notNull).toBe(false);
+    expect(c.outcome.notNull).toBe(false);
+  });
+
+  it("compute_requirements/usage: pure estimate and actual records", () => {
+    const r = getTableColumns(computeRequirements);
+    expect(Object.keys(r).sort()).toEqual(
+      ["concurrency", "createdAt", "estimatedCostUsd", "estimatedRuntimeSeconds", "gpuClass", "id", "orgId", "storageMb", "vramGb", "workers"],
+    );
+    const u = getTableColumns(computeUsage);
+    expect(Object.keys(u).sort()).toEqual(["actualCostUsd", "actualRuntimeSeconds", "allocationRef", "id", "orgId", "recordedAt"]);
   });
 
   it("immutable version families carry unique (production, version) and no updatedAt", () => {

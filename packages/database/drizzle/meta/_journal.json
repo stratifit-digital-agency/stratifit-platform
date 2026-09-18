@@ -85,6 +85,27 @@
       "when": 1789641700000,
       "tag": "0011_production_grants_policies",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1789650347635,
+      "tag": "0012_thick_red_hulk",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1789654448836,
+      "tag": "0013_jobs_grants_policies",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1789654448837,
+      "tag": "0014_dependency_trigger_fix",
+      "breakpoints": true
     }
   ]
 }
