@@ -33,6 +33,14 @@ export const DomainEventName = z.enum([
   "asset.created",
   "asset.approved",
   "asset.rejected",
+  // qc (Stage 2.11: the three documented EVENT_ARCHITECTURE names —
+  // qc.requested/approved/rejected, D2.11-4. qc.changes_requested is NOT a
+  // contract event; the state transition is captured by review state + audit.
+  // QC state never drives asset approval — separate aggregates, hard
+  // domain-separation rule.)
+  "qc.requested",
+  "qc.approved",
+  "qc.rejected",
   // publishing
   "publication.created",
   "publication.published",

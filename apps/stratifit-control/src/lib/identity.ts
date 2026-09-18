@@ -39,6 +39,11 @@ import {
   createAssetService,
   type AssetService,
 } from "@stratifit/assets";
+import {
+  createQcRepository,
+  createQcService,
+  type QcService,
+} from "@stratifit/quality-control";
 import { createDatabase } from "@stratifit/database";
 import { and, eq } from "drizzle-orm";
 import { createControlCookieClient, controlAuthEnv } from "@/lib/supabase-server";
@@ -72,6 +77,7 @@ let services: {
   workflowCatalog: WorkflowCatalogService;
   generation: GenerationService;
   assets: AssetService;
+  qualityControl: QcService;
 } | null = null;
 
 const buildServices = () => {
@@ -282,6 +288,77 @@ const buildServices = () => {
           },
         }),
       }),
+      // Stage 2.11: the QC service shares the SAME Drizzle pool and the SAME
+      // audit transaction writer (D2.4-1 reused): a QC mutation and its audit
+      // record commit in the SAME transaction. Subject resolution (D2.11-2)
+      // uses narrow READ-ONLY org-conditioned lookups over the sanctioned
+      // upstream families (asset_versions, generations, productions — DM
+      // section 10: QC upstream = Asset, Generation, Production);
+      // publication subjects FAIL CLOSED (durable Publishing does not
+      // exist). QC never mutates any upstream aggregate — the hard
+      // domain-separation rule (QC does not own asset approval state).
+      qualityControl: createQcService({
+        repository: createQcRepository({
+          db,
+          auditWriter: {
+            appendWithin: (tx, entry) =>
+              writer.appendWithin(tx, {
+                actorId: entry.actorId,
+                action: entry.action,
+                subjectKind: entry.targetType,
+                subjectId: entry.targetId,
+                organizationId: entry.organizationId ?? null,
+                correlationId: entry.correlationId ?? null,
+                causationId: entry.causationId ?? null,
+                payload: entry.metadata ?? {},
+              }),
+          },
+        }),
+        resolveSubject: async (orgId, subjectKind, subjectRef) => {
+          const { assetVersions, generations, productions } = await import("@stratifit/database");
+          if (subjectKind === "publication") {
+            return { kind: "publication", unsupported: true } as const;
+          }
+          if (subjectKind === "asset_version") {
+            const [row] = await db
+              .select()
+              .from(assetVersions)
+              .where(and(eq(assetVersions.id, subjectRef), eq(assetVersions.orgId, orgId)))
+              .limit(1);
+            return row
+              ? {
+                  kind: "asset_version" as const,
+                  assetVersion: {
+                    id: row.id,
+                    orgId: row.orgId,
+                    assetId: row.assetId,
+                    versionNumber: row.versionNumber,
+                    bucket: row.bucket,
+                    storageKey: row.storageKey,
+                    checksum: row.checksum,
+                    byteSize: row.byteSize,
+                    mimeType: row.mimeType,
+                    technicalMetadata: row.technicalMetadata,
+                  },
+                }
+              : null;
+          }
+          if (subjectKind === "generation") {
+            const [row] = await db
+              .select({ id: generations.id, orgId: generations.orgId, status: generations.status })
+              .from(generations)
+              .where(and(eq(generations.id, subjectRef), eq(generations.orgId, orgId)))
+              .limit(1);
+            return row ? { kind: "generation" as const, generation: row } : null;
+          }
+          const [row] = await db
+            .select({ id: productions.id, orgId: productions.orgId, status: productions.status })
+            .from(productions)
+            .where(and(eq(productions.id, subjectRef), eq(productions.orgId, orgId)))
+            .limit(1);
+          return row ? { kind: "production" as const, production: row } : null;
+        },
+      }),
       membership: createMembershipService({
         repository: membershipRepo,
         // D2.4-1: transaction path is primary; this fallback seam is unused
@@ -325,6 +402,9 @@ export const getGenerationService = (): GenerationService => buildServices().gen
 
 /** Exposed for the Stage 2.10 /api/control/assets routes (D2.10-3). */
 export const getAssetService = (): AssetService => buildServices().assets;
+
+/** Exposed for the Stage 2.11 /api/control/qc routes (D2.11-5). */
+export const getQcService = (): QcService => buildServices().qualityControl;
 
 /** Resolve the current operator server-side; null when anonymous/unprovisioned. */
 export const resolveControlOperator = async (): Promise<ControlOperatorContext | null> => {

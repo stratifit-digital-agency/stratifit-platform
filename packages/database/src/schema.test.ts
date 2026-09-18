@@ -27,6 +27,11 @@ import {
   productionPlanVersions,
   productions,
   projects,
+  qcChecks,
+  qcIssues,
+  qcResults,
+  qcReviewDecisions,
+  qcReviews,
   teams,
   verificationRequirements,
   workflowVersions,
@@ -53,7 +58,16 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         k !== "ASSET_SUBTYPES" &&
         k !== "ASSET_APPROVAL_STATES" &&
         k !== "ASSET_VISIBILITIES" &&
-        k !== "ASSET_DERIVATION_KINDS",
+        k !== "ASSET_DERIVATION_KINDS" &&
+        k !== "QC_SUBJECT_KINDS" &&
+        k !== "QC_CHECK_TYPES" &&
+        k !== "QC_CHECK_STATUSES" &&
+        k !== "QC_REVIEW_STATUSES" &&
+        k !== "QC_DECISIONS" &&
+        k !== "QC_OUTCOMES" &&
+        k !== "QC_EVALUATED_BY" &&
+        k !== "QC_SEVERITIES" &&
+        k !== "QC_ISSUE_RESOLUTIONS",
     );
     expect(exported.sort()).toEqual(
       [
@@ -80,6 +94,11 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         "productionPlanVersions",
         "productions",
         "projects",
+        "qcChecks",
+        "qcIssues",
+        "qcResults",
+        "qcReviewDecisions",
+        "qcReviews",
         "teams",
         "verificationRequirements",
         "workflowVersions",
@@ -183,6 +202,11 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
       "assets",
       "asset_versions",
       "asset_lineage",
+      "qc_checks",
+      "qc_reviews",
+      "qc_review_decisions",
+      "qc_results",
+      "qc_issues",
     ]) {
       expect(sqlText).toContain(`ALTER TABLE "${table}" ENABLE ROW LEVEL SECURITY;`);
     }
@@ -275,6 +299,14 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   assets: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   asset_versions: ["INSERT", "SELECT"],
   asset_lineage: ["INSERT", "SELECT"],
+  // Stage 2.11 (QC Foundation): mutable definition/review/issue aggregates
+  // get full arwd; decision records and results are append-only evidence —
+  // INSERT + SELECT only (the immutable-family pattern).
+  qc_checks: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  qc_reviews: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  qc_review_decisions: ["INSERT", "SELECT"],
+  qc_results: ["INSERT", "SELECT"],
+  qc_issues: ["DELETE", "INSERT", "SELECT", "UPDATE"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -728,6 +760,61 @@ describe("domain-table guard (per approved plan)", () => {
     expect(c.parentVersionId.notNull).toBe(true);
     expect(c.childVersionId.notNull).toBe(true);
     expect(c.derivationKind.notNull).toBe(true);
+  });
+
+  it("qc_checks: mutable definition shape (D2.11-1, D2.11-7 active|archived only)", () => {
+    const c = getTableColumns(qcChecks);
+    expect(Object.keys(c).sort()).toEqual(
+      ["appliesToKind", "checkType", "createdAt", "id", "name", "orgId", "parameters", "required", "status", "updatedAt"].sort(),
+    );
+    expect(c.orgId.notNull).toBe(true);
+    expect(c.name.notNull).toBe(true);
+    expect(c.required.notNull).toBe(true);
+    expect(c.status.notNull).toBe(true);
+    expect(c.status.hasDefault).toBe(true);
+  });
+
+  it("qc_reviews: per-subject lifecycle (DM section 32.5), loose subject_ref, one lifecycle per subject", () => {
+    const c = getTableColumns(qcReviews);
+    expect(Object.keys(c).sort()).toEqual(
+      ["createdAt", "id", "orgId", "requestedBy", "status", "subjectKind", "subjectRef", "updatedAt"].sort(),
+    );
+    expect(c.subjectRef.notNull).toBe(true);
+    expect(c.status.notNull).toBe(true);
+    // Loose cross-module reference (D2.11-2) — no FK, nullable requester.
+    expect(c.requestedBy.notNull).toBe(false);
+  });
+
+  it("qc_review_decisions: immutable evidence (no updatedAt), reviewer never null (D2.11-3)", () => {
+    const c = getTableColumns(qcReviewDecisions);
+    expect(Object.keys(c).sort()).toEqual(
+      ["capabilityUsed", "createdAt", "decision", "id", "orgId", "reason", "reviewId", "reviewerOperatorId"].sort(),
+    );
+    expect("updatedAt" in c).toBe(false);
+    expect(c.reviewerOperatorId.notNull).toBe(true);
+    expect(c.reviewId.notNull).toBe(true);
+    expect(c.capabilityUsed.notNull).toBe(true);
+  });
+
+  it("qc_results: immutable append-only results (no updatedAt), provenance fields", () => {
+    const c = getTableColumns(qcResults);
+    expect(Object.keys(c).sort()).toEqual(
+      ["checkId", "details", "evaluatedAt", "evaluatedBy", "id", "orgId", "outcome", "reviewId", "ruleRef"].sort(),
+    );
+    expect("updatedAt" in c).toBe(false);
+    expect(c.outcome.notNull).toBe(true);
+    expect(c.evaluatedBy.notNull).toBe(true);
+    expect(c.ruleRef.notNull).toBe(false);
+  });
+
+  it("qc_issues: mutable resolution lifecycle named exactly `resolution` (approved)", () => {
+    const c = getTableColumns(qcIssues);
+    expect(Object.keys(c).sort()).toEqual(
+      ["createdAt", "description", "id", "orgId", "resolution", "resolvedAt", "resolvedBy", "resultId", "severity", "updatedAt"].sort(),
+    );
+    expect(c.resolution.notNull).toBe(true);
+    expect(c.resolvedBy.notNull).toBe(false);
+    expect(c.resolvedAt.notNull).toBe(false);
   });
 
   it("asset migrations: lineage derivation kinds match DM section 12 exactly; RLS enabled", () => {

@@ -1183,3 +1183,206 @@ export type AssetVersionRow = typeof assetVersions.$inferSelect;
 export type NewAssetVersionRow = typeof assetVersions.$inferInsert;
 export type AssetLineageRow = typeof assetLineage.$inferSelect;
 export type NewAssetLineageRow = typeof assetLineage.$inferInsert;
+
+/**
+ * QC subject kinds (DM section 18: "subject ref + kind (asset version |
+ * generation | production | publication)").
+ */
+export const QC_SUBJECT_KINDS = ["asset_version", "generation", "production", "publication"] as const;
+export const QC_CHECK_TYPES = ["technical", "moderation", "rights", "editorial"] as const;
+/** D2.11-7: exactly active | archived. Archived checks cannot attach new results. */
+export const QC_CHECK_STATUSES = ["active", "archived"] as const;
+/** DM section 32.5 QC Review state machine — no other states exist. */
+export const QC_REVIEW_STATUSES = ["pending", "in_review", "approved", "rejected", "changes_requested"] as const;
+export const QC_DECISIONS = ["approve", "reject", "changes_requested"] as const;
+export const QC_OUTCOMES = ["pass", "fail", "warn", "skipped"] as const;
+export const QC_EVALUATED_BY = ["human", "automated"] as const;
+export const QC_SEVERITIES = ["blocker", "major", "minor", "note"] as const;
+export const QC_ISSUE_RESOLUTIONS = ["open", "resolved", "waived"] as const;
+
+/**
+ * QC check definition (DM section 18 "QC Check (definition)"). Mutable:
+ * definitions evolve; the results they produced never do. Archived checks
+ * remain historical/readable but cannot be attached to new results
+ * (D2.11-7).
+ */
+export const qcChecks = pgTable(
+  "qc_checks",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    appliesToKind: text("applies_to_kind").notNull(),
+    checkType: text("check_type").notNull(),
+    parameters: jsonb("parameters").$type<Record<string, unknown>>().notNull().default({}),
+    required: boolean("required").notNull().default(true),
+    status: text("status").notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("qc_checks_org_name_unique").on(t.orgId, t.name),
+    check(
+      "qc_checks_applies_to_kind_check",
+      sql`${t.appliesToKind} in ('asset_version', 'generation', 'production', 'publication')`,
+    ),
+    check(
+      "qc_checks_check_type_check",
+      sql`${t.checkType} in ('technical', 'moderation', 'rights', 'editorial')`,
+    ),
+    // D2.11-7: exactly active | archived.
+    check("qc_checks_status_check", sql`${t.status} in ('active', 'archived')`),
+    index("idx_qc_checks_org_applies").on(t.orgId, t.appliesToKind),
+  ],
+).enableRLS();
+
+/**
+ * Per-subject QC review (DM section 18 "Review / Approval / Rejection" and
+ * section 32.5). One lifecycle per subject: UNIQUE(org, subject_kind,
+ * subject_ref) — a superseding asset version is a NEW subject_ref and gets
+ * a fresh review. subject_ref stays a LOOSE cross-module UUID (approved
+ * D2.11-2): zero cross-context foreign keys; organization ownership of the
+ * subject is validated by the service through narrow read-only upstream
+ * lookup ports. publication subjects are structurally supported but FAIL
+ * CLOSED until durable Publishing exists.
+ */
+export const qcReviews = pgTable(
+  "qc_reviews",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    subjectKind: text("subject_kind").notNull(),
+    subjectRef: uuid("subject_ref").notNull(),
+    status: text("status").notNull().default("pending"),
+    requestedBy: uuid("requested_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("qc_reviews_org_subject_unique").on(t.orgId, t.subjectKind, t.subjectRef),
+    check(
+      "qc_reviews_subject_kind_check",
+      sql`${t.subjectKind} in ('asset_version', 'generation', 'production', 'publication')`,
+    ),
+    check(
+      "qc_reviews_status_check",
+      sql`${t.status} in ('pending', 'in_review', 'approved', 'rejected', 'changes_requested')`,
+    ),
+    index("idx_qc_reviews_org_status").on(t.orgId, t.status),
+  ],
+).enableRLS();
+
+/**
+ * Immutable decision record (DM section 18: "the decision record is
+ * immutable and linkable to the operator identity and capability check";
+ * invariant 3: corrections are superseding records, never edits). Appended
+ * in the SAME transaction as the review state transition it produced. No
+ * updatedAt column exists (immutability at the schema level).
+ */
+export const qcReviewDecisions = pgTable(
+  "qc_review_decisions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    reviewId: uuid("review_id")
+      .notNull()
+      .references((): AnyPgColumn => qcReviews.id, { onDelete: "restrict" }),
+    decision: text("decision").notNull(),
+    reviewerOperatorId: uuid("reviewer_operator_id").notNull(),
+    reason: text("reason"),
+    capabilityUsed: text("capability_used").notNull().default("production.approve"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "qc_review_decisions_decision_check",
+      sql`${t.decision} in ('approve', 'reject', 'changes_requested')`,
+    ),
+    index("idx_qc_review_decisions_org_review").on(t.orgId, t.reviewId),
+  ],
+).enableRLS();
+
+/**
+ * Immutable check result (DM section 18 "QC Result (immutable)").
+ * Append-only history: multiple results for the same (review, check) are
+ * allowed and never overwritten; eligibility reads the LATEST result by
+ * (evaluated_at DESC, id DESC). No updatedAt column exists.
+ */
+export const qcResults = pgTable(
+  "qc_results",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    reviewId: uuid("review_id")
+      .notNull()
+      .references((): AnyPgColumn => qcReviews.id, { onDelete: "restrict" }),
+    checkId: uuid("check_id")
+      .notNull()
+      .references((): AnyPgColumn => qcChecks.id, { onDelete: "restrict" }),
+    outcome: text("outcome").notNull(),
+    evaluatedBy: text("evaluated_by").notNull(),
+    ruleRef: text("rule_ref"),
+    details: jsonb("details").$type<Record<string, unknown>>().notNull().default({}),
+    evaluatedAt: timestamp("evaluated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("qc_results_outcome_check", sql`${t.outcome} in ('pass', 'fail', 'warn', 'skipped')`),
+    check("qc_results_evaluated_by_check", sql`${t.evaluatedBy} in ('human', 'automated')`),
+    index("idx_qc_results_org_review").on(t.orgId, t.reviewId),
+    index("idx_qc_results_review_check").on(t.reviewId, t.checkId),
+  ],
+).enableRLS();
+
+/**
+ * QC issue (DM section 18): severity + resolution lifecycle on a mutable
+ * row. Resolution is the approved mutable lifecycle (open → resolved |
+ * waived, resolved_by recorded); deterministic re-resolution conflicts are
+ * rejected at the service layer.
+ */
+export const qcIssues = pgTable(
+  "qc_issues",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    resultId: uuid("result_id")
+      .notNull()
+      .references((): AnyPgColumn => qcResults.id, { onDelete: "restrict" }),
+    severity: text("severity").notNull(),
+    description: text("description").notNull(),
+    resolution: text("resolution").notNull().default("open"),
+    resolvedBy: uuid("resolved_by"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "qc_issues_severity_check",
+      sql`${t.severity} in ('blocker', 'major', 'minor', 'note')`,
+    ),
+    check("qc_issues_resolution_check", sql`${t.resolution} in ('open', 'resolved', 'waived')`),
+    index("idx_qc_issues_org_result").on(t.orgId, t.resultId),
+    index("idx_qc_issues_org_resolution").on(t.orgId, t.resolution),
+  ],
+).enableRLS();
+
+export type QcCheckRow = typeof qcChecks.$inferSelect;
+export type NewQcCheckRow = typeof qcChecks.$inferInsert;
+export type QcReviewRow = typeof qcReviews.$inferSelect;
+export type NewQcReviewRow = typeof qcReviews.$inferInsert;
+export type QcReviewDecisionRow = typeof qcReviewDecisions.$inferSelect;
+export type NewQcReviewDecisionRow = typeof qcReviewDecisions.$inferInsert;
+export type QcResultRow = typeof qcResults.$inferSelect;
+export type NewQcResultRow = typeof qcResults.$inferInsert;
+export type QcIssueRow = typeof qcIssues.$inferSelect;
+export type NewQcIssueRow = typeof qcIssues.$inferInsert;

@@ -50,10 +50,14 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "workflows",
     "generations",
     "assets",
+    "qc_checks",
+    "qc_reviews",
+    "qc_issues",
   ] as const;
 
   // Immutable families (D2.6-4 / D2.7-4 / Stage 2.8 catalog versions /
-  // Stage 2.9 completion provenance): INSERT + SELECT, never UPDATE/DELETE.
+  // Stage 2.9 completion provenance / Stage 2.11 QC evidence): INSERT +
+  // SELECT, never UPDATE/DELETE.
   const immutableTables = [
     "production_plan_versions",
     "gate_decision_records",
@@ -64,6 +68,8 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "generation_provenance",
     "asset_versions",
     "asset_lineage",
+    "qc_review_decisions",
+    "qc_results",
   ] as const;
 
   it("grants stratifit_runtime INSERT+SELECT only on the immutable families", async () => {
