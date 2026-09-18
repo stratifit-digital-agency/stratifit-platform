@@ -49,6 +49,7 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "models",
     "workflows",
     "generations",
+    "assets",
   ] as const;
 
   // Immutable families (D2.6-4 / D2.7-4 / Stage 2.8 catalog versions /
@@ -61,6 +62,8 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "model_versions",
     "workflow_versions",
     "generation_provenance",
+    "asset_versions",
+    "asset_lineage",
   ] as const;
 
   it("grants stratifit_runtime INSERT+SELECT only on the immutable families", async () => {

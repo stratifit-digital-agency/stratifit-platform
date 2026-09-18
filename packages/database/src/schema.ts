@@ -981,6 +981,190 @@ export const generationProvenance = pgTable(
   (t) => [index("idx_generation_provenance_org").on(t.orgId)],
 ).enableRLS();
 
+//
+// ---------------------------------------------------------------------------
+// ASSET DOMAIN (Stage 2.10) — bounded context 6 (SVC section 11), DM section
+// 12/32.4. Owned by services/assets (module placed in services/ per the
+// approved Stage 2.10 plan; the domain families here are its durable rows).
+//
+// PRIVILEGE MODEL (migration 0020, the 0009/0011/0013/0016/0018 append-only
+// pattern):
+//   - assets (mutable lifecycle aggregate, D2.10-1: approval state lives
+//     HERE, not on immutable versions): SELECT + INSERT + UPDATE + DELETE
+//     for stratifit_runtime;
+//   - asset_versions (immutable version family — DM section 12 "Asset
+//     Version (immutable)" / invariant 24): INSERT + SELECT ONLY;
+//   - asset_lineage (immutable DAG edges — DM section 12 / invariant 25):
+//     INSERT + SELECT ONLY. UPDATE and DELETE are NEVER granted and no
+//     UPDATE/DELETE policy exists.
+// D2.10-5: lineage reads are single-hop only; no traversal infrastructure.
+// The lineage DAG cycle defense mirrors the Stage 2.7 jobs precedent:
+// edges are only added alongside newly created versions, so no cycle is
+// constructible through the service API; the DB constraints are
+// defense-in-depth.
+// ---------------------------------------------------------------------------
+
+/** DM section 12: the approved asset-kind taxonomy (no invented kinds). */
+export const ASSET_KINDS = ["video", "audio", "image", "document", "subtitle", "data"] as const;
+
+/** DM section 12: asset subtypes (exact architecture terminology). */
+export const ASSET_SUBTYPES = [
+  "master",
+  "derivative",
+  "thumbnail",
+  "poster",
+  "trailer",
+  "clip",
+  "sample",
+  "subtitle",
+  "lyrics",
+  "caption",
+  "document",
+] as const;
+
+/** DM section 12: asset approval state (the D2.10-1 mutable aggregate state). */
+export const ASSET_APPROVAL_STATES = ["pending", "in_review", "approved", "rejected"] as const;
+
+/** DM section 12: visibility — public visibility is granted at PUBLICATION. */
+export const ASSET_VISIBILITIES = ["internal", "public"] as const;
+
+/** DM section 12: lineage derivation kinds (relationship metadata only). */
+export const ASSET_DERIVATION_KINDS = [
+  "generation",
+  "edit",
+  "transcode",
+  "thumbnail",
+  "trailer",
+  "upscale",
+  "enhancement",
+] as const;
+
+/**
+ * Aggregate root 13 (DM section 12): a managed media item. The database
+ * stores metadata + storage references; binaries live in object storage
+ * (invariant 21 — large binaries never transit PostgreSQL). D2.10-1: the
+ * approval state machine (DM section 32.4) lives on THIS mutable aggregate;
+ * asset_versions stay immutable. `currentVersionId` is the only mutable
+ * version reference (invariant 24). Visibility stays `internal` until a
+ * publication grants public visibility — never by flipping a flag here.
+ */
+export const assets = pgTable(
+  "assets",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    kind: text("kind").notNull(),
+    subtype: text("subtype"),
+    title: text("title").notNull(),
+    description: text("description"),
+    /** Null until the first version is registered (production pointer precedent). */
+    currentVersionId: uuid("current_version_id"),
+    /** D2.10-1: the DM section 32.4 approval state machine lives on the aggregate. */
+    approvalState: text("approval_state").notNull().default("pending"),
+    visibility: text("visibility").notNull().default("internal"),
+    /** Loose cross-module refs (approved D2) — no FKs to other families. */
+    productionId: uuid("production_id"),
+    shotId: uuid("shot_id"),
+    tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("assets_kind_check", sql`${t.kind} in ('video', 'audio', 'image', 'document', 'subtitle', 'data')`),
+    check(
+      "assets_subtype_check",
+      sql`${t.subtype} is null or ${t.subtype} in ('master', 'derivative', 'thumbnail', 'poster', 'trailer', 'clip', 'sample', 'subtitle', 'lyrics', 'caption', 'document')`,
+    ),
+    check(
+      "assets_approval_state_check",
+      sql`${t.approvalState} in ('pending', 'in_review', 'approved', 'rejected')`,
+    ),
+    check("assets_visibility_check", sql`${t.visibility} in ('internal', 'public')`),
+    index("idx_assets_org_kind").on(t.orgId, t.kind),
+    index("idx_assets_org_status").on(t.orgId, t.approvalState),
+    index("idx_assets_org_production").on(t.orgId, t.productionId),
+  ],
+).enableRLS();
+
+/**
+ * Immutable asset version (DM section 12 "Asset Version (immutable)";
+ * invariant 24: versioned entities mutate only by appending new versions).
+ * StorageRef-compatible metadata (bucket/key/checksum/byteSize/mimeType)
+ * mirrors DATA_FLOW section 11 exactly. `provenanceGenerationId` is a
+ * metadata-only reference to the Stage 2.9 generation family — no reverse
+ * wiring exists (Generation does not depend on Assets, and Assets does not
+ * invoke Generation). No updatedAt column exists (immutability at the
+ * schema level).
+ */
+export const assetVersions = pgTable(
+  "asset_versions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    assetId: uuid("asset_id")
+      .notNull()
+      .references((): AnyPgColumn => assets.id, { onDelete: "restrict" }),
+    versionNumber: integer("version_number").notNull(),
+    /** StorageRef metadata (DATA_FLOW section 11) — references, never binaries. */
+    bucket: text("bucket").notNull(),
+    storageKey: text("storage_key").notNull(),
+    checksum: text("checksum").notNull(),
+    byteSize: bigint("byte_size", { mode: "number" }).notNull(),
+    mimeType: text("mime_type").notNull(),
+    /** Technical metadata (resolution, fps, duration, codec, sample rate). */
+    technicalMetadata: jsonb("technical_metadata").$type<Record<string, unknown>>().notNull().default({}),
+    /** Provenance metadata reference into the Stage 2.9 generation family. */
+    provenanceGenerationId: uuid("provenance_generation_id"),
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("asset_versions_org_asset_version_unique").on(t.orgId, t.assetId, t.versionNumber),
+    index("idx_asset_versions_org_asset").on(t.orgId, t.assetId),
+  ],
+).enableRLS();
+
+/**
+ * Immutable lineage edges (DM section 12 "Asset lineage DAG"; invariant 25:
+ * cycles and parent rewrites are rejected). parent_version_id =
+ * child_version_id is structurally impossible via the self-edge CHECK. Rows
+ * are INSERT-only at the privilege layer; the edge unique constraint is the
+ * duplicate-edge backstop. The cycle defense follows the Stage 2.7 jobs
+ * precedent: edges are only added alongside newly registered versions, so
+ * no cycle is constructible through the service API.
+ */
+export const assetLineage = pgTable(
+  "asset_lineage",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    parentVersionId: uuid("parent_version_id")
+      .notNull()
+      .references((): AnyPgColumn => assetVersions.id, { onDelete: "restrict" }),
+    childVersionId: uuid("child_version_id")
+      .notNull()
+      .references((): AnyPgColumn => assetVersions.id, { onDelete: "restrict" }),
+    derivationKind: text("derivation_kind").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "asset_lineage_derivation_kind_check",
+      sql`${t.derivationKind} in ('generation', 'edit', 'transcode', 'thumbnail', 'trailer', 'upscale', 'enhancement')`,
+    ),
+    // Invariant 25: a version is never its own parent.
+    check("asset_lineage_no_self_edge_check", sql`${t.parentVersionId} <> ${t.childVersionId}`),
+    unique("asset_lineage_edge_unique").on(t.parentVersionId, t.childVersionId),
+    index("idx_asset_lineage_org_child").on(t.orgId, t.childVersionId),
+  ],
+).enableRLS();
+
 export type ModelRow = typeof models.$inferSelect;
 export type NewModelRow = typeof models.$inferInsert;
 export type ModelVersionRow = typeof modelVersions.$inferSelect;
@@ -993,3 +1177,9 @@ export type GenerationRow = typeof generations.$inferSelect;
 export type NewGenerationRow = typeof generations.$inferInsert;
 export type GenerationProvenanceRow = typeof generationProvenance.$inferSelect;
 export type NewGenerationProvenanceRow = typeof generationProvenance.$inferInsert;
+export type AssetRow = typeof assets.$inferSelect;
+export type NewAssetRow = typeof assets.$inferInsert;
+export type AssetVersionRow = typeof assetVersions.$inferSelect;
+export type NewAssetVersionRow = typeof assetVersions.$inferInsert;
+export type AssetLineageRow = typeof assetLineage.$inferSelect;
+export type NewAssetLineageRow = typeof assetLineage.$inferInsert;

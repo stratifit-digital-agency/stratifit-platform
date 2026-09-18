@@ -4,6 +4,9 @@ import { describe, expect, it } from "vitest";
 import { getTableColumns } from "drizzle-orm";
 import * as schemaExports from "./schema";
 import {
+  assetLineage,
+  assetVersions,
+  assets,
   auditLog,
   audienceUsers,
   computeRequirements,
@@ -45,11 +48,19 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         !k.startsWith("New") &&
         k !== "JOB_TYPES" &&
         k !== "MODEL_CAPABILITY_KINDS" &&
-        k !== "GENERATION_STATUSES",
+        k !== "GENERATION_STATUSES" &&
+        k !== "ASSET_KINDS" &&
+        k !== "ASSET_SUBTYPES" &&
+        k !== "ASSET_APPROVAL_STATES" &&
+        k !== "ASSET_VISIBILITIES" &&
+        k !== "ASSET_DERIVATION_KINDS",
     );
     expect(exported.sort()).toEqual(
       [
         "auditLog",
+        "assetLineage",
+        "assetVersions",
+        "assets",
         "audienceUsers",
         "computeRequirements",
         "computeUsage",
@@ -163,6 +174,15 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
       "job_attempts",
       "compute_requirements",
       "compute_usage",
+      "models",
+      "model_versions",
+      "workflows",
+      "workflow_versions",
+      "generations",
+      "generation_provenance",
+      "assets",
+      "asset_versions",
+      "asset_lineage",
     ]) {
       expect(sqlText).toContain(`ALTER TABLE "${table}" ENABLE ROW LEVEL SECURITY;`);
     }
@@ -248,6 +268,13 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   // SELECT only (D2.9-1; the audit_log/job_attempts pattern).
   generations: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   generation_provenance: ["INSERT", "SELECT"],
+  // Stage 2.10 (Asset Domain Foundation, D2.10-1): the mutable asset
+  // aggregate carries the approval state machine and gets full arwd; the
+  // version family and the lineage DAG edges are append-only — INSERT +
+  // SELECT only (the audit_log/job_attempts/immutable-family pattern).
+  assets: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  asset_versions: ["INSERT", "SELECT"],
+  asset_lineage: ["INSERT", "SELECT"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -393,7 +420,6 @@ describe("domain-table guard (per approved plan)", () => {
     const forbidden = [
       "scenes",
       "shots",
-      "assets",
       "publications",
       "aiCreators",
       "conversations",
@@ -625,5 +651,104 @@ describe("domain-table guard (per approved plan)", () => {
     expect(c.generationId.primary).toBe(true);
     expect(c.orgId.notNull).toBe(true);
     expect(c.completedAt.notNull).toBe(true);
+  });
+
+  it("assets: D2.10-1 mutable aggregate with approval state + current-version pointer, DM section 12 taxonomy", () => {
+    const c = getTableColumns(assets);
+    expect(Object.keys(c).sort()).toEqual(
+      [
+        "approvalState",
+        "createdAt",
+        "currentVersionId",
+        "description",
+        "id",
+        "kind",
+        "orgId",
+        "productionId",
+        "shotId",
+        "subtype",
+        "tags",
+        "title",
+        "updatedAt",
+        "visibility",
+      ].sort(),
+    );
+    expect(c.orgId.notNull).toBe(true);
+    expect(c.kind.notNull).toBe(true);
+    expect(c.title.notNull).toBe(true);
+    // D2.10-1: the approval state machine lives on the MUTABLE aggregate.
+    expect(c.approvalState.notNull).toBe(true);
+    expect(c.visibility.notNull).toBe(true);
+    // Pointer is null until the first version is registered (production precedent).
+    expect(c.currentVersionId.notNull).toBe(false);
+    // Loose cross-module references (approved D2) — all nullable, no FKs.
+    expect(c.productionId.notNull).toBe(false);
+    expect(c.shotId.notNull).toBe(false);
+    expect(c.subtype.notNull).toBe(false);
+  });
+
+  it("asset_versions: immutable family shape (no updatedAt), unique (org, asset, version)", () => {
+    const c = getTableColumns(assetVersions);
+    expect(Object.keys(c).sort()).toEqual(
+      [
+        "assetId",
+        "bucket",
+        "byteSize",
+        "checksum",
+        "createdAt",
+        "createdBy",
+        "id",
+        "mimeType",
+        "orgId",
+        "provenanceGenerationId",
+        "storageKey",
+        "technicalMetadata",
+        "versionNumber",
+      ].sort(),
+    );
+    expect("updatedAt" in c).toBe(false);
+    expect(c.assetId.notNull).toBe(true);
+    expect(c.versionNumber.notNull).toBe(true);
+    // StorageRef metadata (DATA_FLOW section 11) is required on every version.
+    expect(c.bucket.notNull).toBe(true);
+    expect(c.storageKey.notNull).toBe(true);
+    expect(c.checksum.notNull).toBe(true);
+    expect(c.byteSize.notNull).toBe(true);
+    expect(c.mimeType.notNull).toBe(true);
+    // Provenance is a metadata-only reference into the Stage 2.9 family.
+    expect(c.provenanceGenerationId.notNull).toBe(false);
+  });
+
+  it("asset_lineage: immutable DAG edges (no updatedAt), derivation-kind CHECK, no self-edge", () => {
+    const c = getTableColumns(assetLineage);
+    expect(Object.keys(c).sort()).toEqual(
+      ["childVersionId", "createdAt", "derivationKind", "id", "orgId", "parentVersionId"],
+    );
+    expect("updatedAt" in c).toBe(false);
+    expect(c.parentVersionId.notNull).toBe(true);
+    expect(c.childVersionId.notNull).toBe(true);
+    expect(c.derivationKind.notNull).toBe(true);
+  });
+
+  it("asset migrations: lineage derivation kinds match DM section 12 exactly; RLS enabled", () => {
+    const migrationsDir = fileURLToPath(new URL("../drizzle/", import.meta.url));
+    const sqlText = readdirSync(migrationsDir)
+      .filter((f) => f.endsWith(".sql"))
+      .sort()
+      .map((f) => readFileSync(`${migrationsDir}/${f}`, "utf8"))
+      .join("\n");
+    expect(sqlText).toContain("asset_lineage_derivation_kind_check");
+    for (const kind of ["generation", "edit", "transcode", "thumbnail", "trailer", "upscale", "enhancement"]) {
+      expect(sqlText).toContain(`'${kind}'`);
+    }
+    expect(sqlText).toContain("asset_lineage_no_self_edge_check");
+    for (const table of ["assets", "asset_versions", "asset_lineage"]) {
+      expect(sqlText).toContain(`ALTER TABLE "${table}" ENABLE ROW LEVEL SECURITY;`);
+    }
+    const policies = sqlText.match(/CREATE POLICY[^;]+;/g) ?? [];
+    const assetPolicies = policies.filter((p) =>
+      ["public.assets", "public.asset_versions", "public.asset_lineage"].some((t) => p.includes(`ON ${t}`)),
+    );
+    for (const p of assetPolicies) expect(p).toContain("TO stratifit_runtime");
   });
 });

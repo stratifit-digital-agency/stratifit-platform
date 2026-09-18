@@ -28,9 +28,11 @@ export const DomainEventName = z.enum([
   "generation.completed",
   "generation.failed",
   "generation.cancelled",
-  // assets
+  // assets (Stage 2.10: rejected joins the pre-existing created/approved,
+  // mirroring the DM section 35 "future extensions" list — additive only)
   "asset.created",
   "asset.approved",
+  "asset.rejected",
   // publishing
   "publication.created",
   "publication.published",

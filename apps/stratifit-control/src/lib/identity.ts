@@ -34,6 +34,11 @@ import {
   createGenerationService,
   type GenerationService,
 } from "@stratifit/generation";
+import {
+  createAssetRepository,
+  createAssetService,
+  type AssetService,
+} from "@stratifit/assets";
 import { createDatabase } from "@stratifit/database";
 import { and, eq } from "drizzle-orm";
 import { createControlCookieClient, controlAuthEnv } from "@/lib/supabase-server";
@@ -66,6 +71,7 @@ let services: {
   catalog: CatalogService;
   workflowCatalog: WorkflowCatalogService;
   generation: GenerationService;
+  assets: AssetService;
 } | null = null;
 
 const buildServices = () => {
@@ -252,6 +258,30 @@ const buildServices = () => {
         modelRegistry: registry.catalog,
         workflowRegistry: registry.workflow,
       }),
+      // Stage 2.10: the asset service shares the SAME Drizzle pool and the
+      // SAME audit transaction writer (D2.4-1 reused): an operator-originated
+      // asset mutation and its audit record commit in the SAME transaction.
+      // Composition-root adapter maps the asset seam shape (targetType/
+      // targetId/metadata) to admin-audit's canonical entry (subjectKind/
+      // subjectId/payload) — same mapping as the other services above.
+      assets: createAssetService({
+        repository: createAssetRepository({
+          db,
+          auditWriter: {
+            appendWithin: (tx, entry) =>
+              writer.appendWithin(tx, {
+                actorId: entry.actorId,
+                action: entry.action,
+                subjectKind: entry.targetType,
+                subjectId: entry.targetId,
+                organizationId: entry.organizationId ?? null,
+                correlationId: entry.correlationId ?? null,
+                causationId: entry.causationId ?? null,
+                payload: entry.metadata ?? {},
+              }),
+          },
+        }),
+      }),
       membership: createMembershipService({
         repository: membershipRepo,
         // D2.4-1: transaction path is primary; this fallback seam is unused
@@ -292,6 +322,9 @@ export const getWorkflowCatalogService = (): WorkflowCatalogService => buildServ
 
 /** Exposed for the Stage 2.9 /api/control/generations routes (D2.9-3). */
 export const getGenerationService = (): GenerationService => buildServices().generation;
+
+/** Exposed for the Stage 2.10 /api/control/assets routes (D2.10-3). */
+export const getAssetService = (): AssetService => buildServices().assets;
 
 /** Resolve the current operator server-side; null when anonymous/unprovisioned. */
 export const resolveControlOperator = async (): Promise<ControlOperatorContext | null> => {
