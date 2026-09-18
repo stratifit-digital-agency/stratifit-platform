@@ -10,6 +10,16 @@ import {
   type OperatorIdentityContext,
 } from "@stratifit/identity";
 import {
+  createCatalogRepository,
+  createCatalogService,
+  type CatalogService,
+} from "@stratifit/ai";
+import {
+  createWorkflowCatalogRepository,
+  createWorkflowCatalogService,
+  type WorkflowCatalogService,
+} from "@stratifit/workflows";
+import {
   createAdminAuditService,
   createDrizzleAuditRepository,
   type AdminAuditService,
@@ -47,6 +57,8 @@ let services: {
   membership: MembershipService;
   audit: AdminAuditService;
   production: ProductionService;
+  catalog: CatalogService;
+  workflowCatalog: WorkflowCatalogService;
 } | null = null;
 
 const buildServices = () => {
@@ -104,6 +116,48 @@ const buildServices = () => {
     services = {
       audit: audit,
       production,
+      // Stage 2.8: the durable model/workflow registries share the SAME
+      // Drizzle pool and the SAME audit transaction writer (D2.4-1 reused):
+      // a registry mutation and its audit record commit in the SAME
+      // transaction. Composition-root adapter maps the catalog seam shape
+      // (targetType/targetId/metadata) to admin-audit's canonical entry
+      // (subjectKind/subjectId/payload) — same mapping as above.
+      catalog: createCatalogService({
+        repository: createCatalogRepository({
+          db,
+          auditWriter: {
+            appendWithin: (tx, entry) =>
+              writer.appendWithin(tx, {
+                actorId: entry.actorId,
+                action: entry.action,
+                subjectKind: entry.targetType,
+                subjectId: entry.targetId,
+                organizationId: entry.organizationId ?? null,
+                correlationId: entry.correlationId ?? null,
+                causationId: entry.causationId ?? null,
+                payload: entry.metadata ?? {},
+              }),
+          },
+        }),
+      }),
+      workflowCatalog: createWorkflowCatalogService({
+        repository: createWorkflowCatalogRepository({
+          db,
+          auditWriter: {
+            appendWithin: (tx, entry) =>
+              writer.appendWithin(tx, {
+                actorId: entry.actorId,
+                action: entry.action,
+                subjectKind: entry.targetType,
+                subjectId: entry.targetId,
+                organizationId: entry.organizationId ?? null,
+                correlationId: entry.correlationId ?? null,
+                causationId: entry.causationId ?? null,
+                payload: entry.metadata ?? {},
+              }),
+          },
+        }),
+      }),
       membership: createMembershipService({
         repository: membershipRepo,
         // D2.4-1: transaction path is primary; this fallback seam is unused
@@ -135,6 +189,12 @@ export const getAuditService = (): AdminAuditService => buildServices().audit;
 
 /** Exposed for the Stage 2.6 /api/control/{projects,productions} routes. */
 export const getProductionService = (): ProductionService => buildServices().production;
+
+/** Exposed for the Stage 2.8 /api/control/models routes (D2.8-1). */
+export const getCatalogService = (): CatalogService => buildServices().catalog;
+
+/** Exposed for the Stage 2.8 /api/control/workflows routes (D2.8-1). */
+export const getWorkflowCatalogService = (): WorkflowCatalogService => buildServices().workflowCatalog;
 
 /** Resolve the current operator server-side; null when anonymous/unprovisioned. */
 export const resolveControlOperator = async (): Promise<ControlOperatorContext | null> => {

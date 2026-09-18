@@ -9,9 +9,11 @@ import { afterAll, describe, expect, it } from "vitest";
  * against the LIVE remote:
  *   - stratifit_runtime has NO privileges on platform_config;
  *   - per-table privilege map: six tenancy tables + two mutable production
- *     aggregates + the four mutable Stage 2.7 job/compute families = arwd;
+ *     aggregates + the four mutable Stage 2.7 job/compute families + the two
+ *     mutable Stage 2.8 catalog parents = arwd;
  *     audit_log + the three immutable Stage 2.6 production version families +
- *     the immutable Stage 2.7 job attempt history = INSERT+SELECT only
+ *     the immutable Stage 2.7 job attempt history + the two immutable Stage
+ *     2.8 catalog version families = INSERT+SELECT only
  *     (append-only — UPDATE/DELETE must never exist);
  *   - the blanket stratifit_app default table privilege is gone (Option A);
  *   - role attributes (LOGIN-only, non-superuser, no CREATEDB/CREATEROLE/
@@ -42,14 +44,19 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "job_dependencies",
     "compute_requirements",
     "compute_usage",
+    "models",
+    "workflows",
   ] as const;
 
-  // Immutable families (D2.6-4 / D2.7-4): INSERT + SELECT, never UPDATE/DELETE.
+  // Immutable families (D2.6-4 / D2.7-4 / Stage 2.8 catalog versions):
+  // INSERT + SELECT, never UPDATE/DELETE.
   const immutableTables = [
     "production_plan_versions",
     "gate_decision_records",
     "manifest_versions",
     "job_attempts",
+    "model_versions",
+    "workflow_versions",
   ] as const;
 
   it("grants stratifit_runtime INSERT+SELECT only on the immutable families", async () => {
@@ -85,7 +92,7 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     const byTable = new Map(grants.map((g) => [g.table_name as string, g.privs as string]));
     for (const t of runtimeTables) expect(byTable.get(t)).toBe("DELETE,INSERT,SELECT,UPDATE");
     expect(byTable.get("platform_config")).toBeUndefined();
-    // audit_log and the three Stage 2.6 immutable families are asserted
+    // audit_log and the immutable version families are asserted
     // separately (INSERT+SELECT only) above/below.
     const expectedArwd = [...runtimeTables].sort();
     expect(

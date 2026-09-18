@@ -687,3 +687,168 @@ export type ComputeRequirementRow = typeof computeRequirements.$inferSelect;
 export type NewComputeRequirementRow = typeof computeRequirements.$inferInsert;
 export type ComputeUsageRow = typeof computeUsage.$inferSelect;
 export type NewComputeUsageRow = typeof computeUsage.$inferInsert;
+
+/**
+ * Catalog (Model/Workflow) — Stage 2.8 (bounded context 8, aggregates 15/16).
+ *
+ * SERVICE_ARCHITECTURE section 11 context 8 assigns the durable rows
+ * (models, model_versions, workflows, workflow_versions) to packages/ai and
+ * packages/workflows via packages/database repositories. DOMAIN_MODEL
+ * section 14/15: vendor/runtime identifiers are platform-agnostic REFERENCES
+ * (adapter_ref / runtime_ref), never provider concepts (invariant 20);
+ * credentials never appear here (invariant 4).
+ *
+ * PRIVILEGE MODEL (migration 0016, the 0009/0011/0013 append-only pattern):
+ *   - models, workflows (mutable parents): runtime ARWD;
+ *   - model_versions, workflow_versions (immutable version families —
+ *     DM section 33 "immutable version rows", "historical versions are never
+ *     deleted or rewritten"): INSERT + SELECT ONLY.
+ */
+
+/** Capability-kind allowlist — mirrors packages/contracts CAPABILITY_KINDS. */
+export const MODEL_CAPABILITY_KINDS = [
+  "image.generation",
+  "video.generation",
+  "voice.synthesis",
+  "music.generation",
+  "audio",
+  "lip.sync",
+  "sfx",
+  "vfx",
+  "enhancement",
+] as const;
+
+/**
+ * Aggregate root 15: one registered AI capability entry point. Registry
+ * status follows DM section 14 (`active` / `deprecated` / `disabled`);
+ * transitions are guarded in the service, not here (a plain status column).
+ * vendor_label is operator-UI display metadata only — never a domain concept.
+ */
+export const models = pgTable(
+  "models",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    capabilityKind: text("capability_kind").notNull(),
+    displayName: text("display_name").notNull(),
+    /** Platform-agnostic vendor label for operator UIs — never a provider ref. */
+    vendorLabel: text("vendor_label").notNull(),
+    status: text("status").notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "models_capability_kind_check",
+      sql`${t.capabilityKind} in ('image.generation', 'video.generation', 'voice.synthesis', 'music.generation', 'audio', 'lip.sync', 'sfx', 'vfx', 'enhancement')`,
+    ),
+    check("models_status_check", sql`${t.status} in ('active', 'deprecated', 'disabled')`),
+    unique("models_org_name_unique").on(t.orgId, t.name),
+    index("idx_models_org_status").on(t.orgId, t.status),
+    index("idx_models_org_capability").on(t.orgId, t.capabilityKind),
+  ],
+).enableRLS();
+
+/**
+ * Immutable model version (DM section 14): registered once, never edited or
+ * deleted. adapter_ref identifies the registered adapter implementation
+ * (packages/ai) — a platform-agnostic identifier, never credentials.
+ * compatibilities are metadata evaluated by the planner/gate — never vendor
+ * logic in the domain.
+ */
+export const modelVersions = pgTable(
+  "model_versions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    modelId: uuid("model_id")
+      .notNull()
+      .references(() => models.id, { onDelete: "restrict" }),
+    version: text("version").notNull(),
+    /** Platform-agnostic adapter identifier (packages/ai registry key). */
+    adapterRef: text("adapter_ref").notNull(),
+    /** Input/output kinds and constraints (max resolution/duration). */
+    compatibility: jsonb("compatibility").$type<Record<string, unknown>>().notNull().default({}),
+    defaultParameters: jsonb("default_parameters").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status").notNull().default("active"),
+    registeredAt: timestamp("registered_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("model_versions_status_check", sql`${t.status} in ('active', 'deprecated', 'disabled')`),
+    unique("model_versions_org_model_version_unique").on(t.orgId, t.modelId, t.version),
+    index("idx_model_versions_model").on(t.modelId),
+  ],
+).enableRLS();
+
+/**
+ * Aggregate root 16: one registered workflow entry point. `supports` is a
+ * JSON array of capability kinds (service-validated against the same
+ * allowlist); historical workflow versions are never deleted or rewritten
+ * (DM section 15).
+ */
+export const workflows = pgTable(
+  "workflows",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    supports: jsonb("supports").$type<readonly string[]>().notNull().default([]),
+    status: text("status").notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("workflows_status_check", sql`${t.status} in ('active', 'deprecated', 'disabled')`),
+    unique("workflows_org_name_unique").on(t.orgId, t.name),
+    index("idx_workflows_org_status").on(t.orgId, t.status),
+  ],
+).enableRLS();
+
+/**
+ * Immutable workflow version (DM section 15). runtime_ref is a
+ * platform-agnostic runtime-TYPE identifier (ComfyUI is one such runtime
+ * behind the abstraction, not a domain concept). definition is the opaque,
+ * schema-validated definition payload (D2.8-2: jsonb column) interpreted by
+ * the runtime — never credentials, never a provider concept.
+ */
+export const workflowVersions = pgTable(
+  "workflow_versions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    workflowId: uuid("workflow_id")
+      .notNull()
+      .references(() => workflows.id, { onDelete: "restrict" }),
+    version: text("version").notNull(),
+    /** Platform-agnostic runtime-type identifier. */
+    runtimeRef: text("runtime_ref").notNull(),
+    /** Opaque runtime-interpreted definition payload (D2.8-2). */
+    definition: jsonb("definition").$type<Record<string, unknown>>().notNull().default({}),
+    compatibility: jsonb("compatibility").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status").notNull().default("active"),
+    registeredAt: timestamp("registered_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("workflow_versions_status_check", sql`${t.status} in ('active', 'deprecated', 'disabled')`),
+    unique("workflow_versions_org_workflow_version_unique").on(t.orgId, t.workflowId, t.version),
+    index("idx_workflow_versions_workflow").on(t.workflowId),
+  ],
+).enableRLS();
+
+export type ModelRow = typeof models.$inferSelect;
+export type NewModelRow = typeof models.$inferInsert;
+export type ModelVersionRow = typeof modelVersions.$inferSelect;
+export type NewModelVersionRow = typeof modelVersions.$inferInsert;
+export type WorkflowRow = typeof workflows.$inferSelect;
+export type NewWorkflowRow = typeof workflows.$inferInsert;
+export type WorkflowVersionRow = typeof workflowVersions.$inferSelect;
+export type NewWorkflowVersionRow = typeof workflowVersions.$inferInsert;

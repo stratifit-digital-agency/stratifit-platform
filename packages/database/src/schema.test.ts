@@ -13,6 +13,8 @@ import {
   jobDependencies,
   jobs,
   manifestVersions,
+  modelVersions,
+  models,
   operators,
   organizations,
   orgMemberships,
@@ -22,6 +24,8 @@ import {
   projects,
   teams,
   verificationRequirements,
+  workflowVersions,
+  workflows,
 } from "./schema";
 
 /**
@@ -34,7 +38,7 @@ import {
 describe("identity foundation (Stage 2.3, approved shape)", () => {
   it("exposes exactly the identity/tenancy tables plus platform_config", () => {
     const exported = Object.keys(schemaExports).filter(
-      (k) => !k.endsWith("Row") && !k.startsWith("New") && k !== "JOB_TYPES",
+      (k) => !k.endsWith("Row") && !k.startsWith("New") && k !== "JOB_TYPES" && k !== "MODEL_CAPABILITY_KINDS",
     );
     expect(exported.sort()).toEqual(
       [
@@ -47,6 +51,8 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         "jobDependencies",
         "jobs",
         "manifestVersions",
+        "modelVersions",
+        "models",
         "operators",
         "organizations",
         "orgMemberships",
@@ -56,6 +62,8 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         "projects",
         "teams",
         "verificationRequirements",
+        "workflowVersions",
+        "workflows",
       ].sort(),
     );
   });
@@ -220,6 +228,12 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   compute_requirements: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   compute_usage: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   job_attempts: ["INSERT", "SELECT"],
+  // Stage 2.8 (Catalog Foundation): mutable registry parents get full arwd;
+  // the version families are append-only — INSERT + SELECT only.
+  models: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  workflows: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  model_versions: ["INSERT", "SELECT"],
+  workflow_versions: ["INSERT", "SELECT"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -481,5 +495,44 @@ describe("domain-table guard (per approved plan)", () => {
     expect(c.versionNumber.notNull).toBe(true);
     const m = getTableColumns(manifestVersions);
     expect(m.versionNumber.notNull).toBe(true);
+  });
+
+  it("models: mutable parent with capability/status CHECKs and (org, name) uniqueness", () => {
+    const c = getTableColumns(models);
+    expect(Object.keys(c).sort()).toEqual(
+      ["capabilityKind", "createdAt", "displayName", "id", "name", "orgId", "status", "updatedAt", "vendorLabel"],
+    );
+    expect(c.orgId.notNull).toBe(true);
+    expect(c.capabilityKind.notNull).toBe(true);
+    expect(c.status.notNull).toBe(true);
+  });
+
+  it("model_versions: immutable family shape (no updatedAt), unique (org, model, version)", () => {
+    const c = getTableColumns(modelVersions);
+    expect(Object.keys(c).sort()).toEqual(
+      ["adapterRef", "compatibility", "defaultParameters", "id", "modelId", "orgId", "registeredAt", "status", "version"],
+    );
+    expect("updatedAt" in c).toBe(false);
+    expect(c.modelId.notNull).toBe(true);
+    expect(c.version.notNull).toBe(true);
+    expect(c.adapterRef.notNull).toBe(true);
+  });
+
+  it("workflows: mutable parent with supports array and status CHECK", () => {
+    const c = getTableColumns(workflows);
+    expect(Object.keys(c).sort()).toEqual(["createdAt", "id", "name", "orgId", "status", "supports", "updatedAt"]);
+    expect(c.orgId.notNull).toBe(true);
+    expect(c.supports.notNull).toBe(true);
+  });
+
+  it("workflow_versions: immutable family shape (no updatedAt), unique (org, workflow, version)", () => {
+    const c = getTableColumns(workflowVersions);
+    expect(Object.keys(c).sort()).toEqual(
+      ["compatibility", "definition", "id", "orgId", "registeredAt", "runtimeRef", "status", "version", "workflowId"],
+    );
+    expect("updatedAt" in c).toBe(false);
+    expect(c.workflowId.notNull).toBe(true);
+    expect(c.runtimeRef.notNull).toBe(true);
+    expect(c.definition.notNull).toBe(true);
   });
 });
