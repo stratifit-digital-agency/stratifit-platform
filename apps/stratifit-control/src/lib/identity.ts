@@ -29,7 +29,13 @@ import {
   createProductionService,
   type ProductionService,
 } from "@stratifit/production-engine";
+import {
+  createGenerationRepository,
+  createGenerationService,
+  type GenerationService,
+} from "@stratifit/generation";
 import { createDatabase } from "@stratifit/database";
+import { and, eq } from "drizzle-orm";
 import { createControlCookieClient, controlAuthEnv } from "@/lib/supabase-server";
 
 /**
@@ -59,6 +65,7 @@ let services: {
   production: ProductionService;
   catalog: CatalogService;
   workflowCatalog: WorkflowCatalogService;
+  generation: GenerationService;
 } | null = null;
 
 const buildServices = () => {
@@ -66,6 +73,64 @@ const buildServices = () => {
     const db = createDatabase(process.env.DATABASE_URL as string);
     const audit = createAdminAuditService({ repository: createDrizzleAuditRepository({ db }) });
     const writer = audit.transactionWriter();
+    // Stage 2.9: narrow Catalog resolution ports over the SAME pool — the
+    // generation service reads (never writes) the Stage 2.8 catalog families
+    // through these structural seams (SVC sanctioned import: generation ──► ai,
+    // workflows; read-only, org-conditioned selects).
+    const registry = {
+      catalog: {
+        findModel: async (orgId: string, modelId: string) => {
+          const { models } = await import("@stratifit/database");
+          const [row] = await db
+            .select({ id: models.id, orgId: models.orgId, name: models.name, status: models.status })
+            .from(models)
+            .where(and(eq(models.id, modelId), eq(models.orgId, orgId)))
+            .limit(1);
+          return row ?? null;
+        },
+        resolveModelVersion: async (orgId: string, modelId: string, version: string) => {
+          const { modelVersions } = await import("@stratifit/database");
+          const [row] = await db
+            .select({
+              id: modelVersions.id,
+              orgId: modelVersions.orgId,
+              modelId: modelVersions.modelId,
+              version: modelVersions.version,
+              status: modelVersions.status,
+            })
+            .from(modelVersions)
+            .where(and(eq(modelVersions.orgId, orgId), eq(modelVersions.modelId, modelId), eq(modelVersions.version, version)))
+            .limit(1);
+          return row ? { ...row, status: row.status as "active" | "deprecated" | "disabled" } : null;
+        },
+      },
+      workflow: {
+        findWorkflow: async (orgId: string, workflowId: string) => {
+          const { workflows } = await import("@stratifit/database");
+          const [row] = await db
+            .select({ id: workflows.id, orgId: workflows.orgId, name: workflows.name, status: workflows.status })
+            .from(workflows)
+            .where(and(eq(workflows.id, workflowId), eq(workflows.orgId, orgId)))
+            .limit(1);
+          return row ?? null;
+        },
+        resolveWorkflowVersion: async (orgId: string, workflowId: string, version: string) => {
+          const { workflowVersions } = await import("@stratifit/database");
+          const [row] = await db
+            .select({
+              id: workflowVersions.id,
+              orgId: workflowVersions.orgId,
+              workflowId: workflowVersions.workflowId,
+              version: workflowVersions.version,
+              status: workflowVersions.status,
+            })
+            .from(workflowVersions)
+            .where(and(eq(workflowVersions.orgId, orgId), eq(workflowVersions.workflowId, workflowId), eq(workflowVersions.version, version)))
+            .limit(1);
+          return row ? { ...row, status: row.status as "active" | "deprecated" | "disabled" } : null;
+        },
+      },
+    };
     const membershipRepo = createDrizzleMembershipRepository({
       db,
       // Composition-root adapter: identity's D4 seam shape (targetType/
@@ -158,6 +223,35 @@ const buildServices = () => {
           },
         }),
       }),
+      // Stage 2.9: the generation service shares the SAME Drizzle pool and
+      // the SAME audit transaction writer (D2.4-1 reused): an actor-
+      // originated generation mutation (request/cancel) and its audit record
+      // commit in the SAME transaction. Composition-root adapter maps the
+      // generation seam shape (targetType/targetId/metadata) to admin-audit's
+      // canonical entry (subjectKind/subjectId/payload) — same mapping as the
+      // other services above.
+      generation: createGenerationService({
+        repository: createGenerationRepository({
+          db,
+          auditWriter: {
+            appendWithin: (tx, entry) =>
+              writer.appendWithin(tx, {
+                actorId: entry.actorId,
+                action: entry.action,
+                subjectKind: entry.targetType,
+                subjectId: entry.targetId,
+                organizationId: entry.organizationId ?? null,
+                correlationId: entry.correlationId ?? null,
+                causationId: entry.causationId ?? null,
+                payload: entry.metadata ?? {},
+              }),
+          },
+        }),
+        // D2.8-3: generation resolves manifest selections against the
+        // durable Catalog (read-only ports over the SAME pool, above).
+        modelRegistry: registry.catalog,
+        workflowRegistry: registry.workflow,
+      }),
       membership: createMembershipService({
         repository: membershipRepo,
         // D2.4-1: transaction path is primary; this fallback seam is unused
@@ -195,6 +289,9 @@ export const getCatalogService = (): CatalogService => buildServices().catalog;
 
 /** Exposed for the Stage 2.8 /api/control/workflows routes (D2.8-1). */
 export const getWorkflowCatalogService = (): WorkflowCatalogService => buildServices().workflowCatalog;
+
+/** Exposed for the Stage 2.9 /api/control/generations routes (D2.9-3). */
+export const getGenerationService = (): GenerationService => buildServices().generation;
 
 /** Resolve the current operator server-side; null when anonymous/unprovisioned. */
 export const resolveControlOperator = async (): Promise<ControlOperatorContext | null> => {

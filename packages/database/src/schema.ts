@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   check,
   index,
@@ -13,6 +14,7 @@ import {
   unique,
   uniqueIndex,
   uuid,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 
 /**
@@ -844,6 +846,141 @@ export const workflowVersions = pgTable(
   ],
 ).enableRLS();
 
+// ---------------------------------------------------------------------------
+// Generation domain (Stage 2.9, approved decisions D2.9-1..D2.9-4)
+//
+// Conceptual owner: services/generation (SVC section 11 context 7). Tenancy
+// per D1: org_id NOT NULL on every table. Cross-module rule (D2): production/
+// scene/shot/job/output-asset stay LOOSE references — no FKs to other module
+// families; the only FKs are intra-family (generations -> generations for
+// lineage) plus organizations. Catalog versions are pinned UUIDs (invariants
+// 8/9) resolved by the generation service — not enforced by FK (the catalog
+// families live in another bounded context; same-org consistency is
+// validated by the service at request time).
+//
+// PRIVILEGE MODEL (migration 0018, the 0009/0011/0013/0016 append-only
+// pattern):
+//   - generations (mutable lifecycle aggregate): SELECT + INSERT + UPDATE
+//     + DELETE for stratifit_runtime;
+//   - generation_provenance (immutable completion record — DM section 13
+//     "historical provenance is immutable", invariant 3, DM section 34
+//     "written once"): INSERT + SELECT ONLY. UPDATE and DELETE are NEVER
+//     granted and no UPDATE/DELETE policy exists.
+// D2.9-4: no Generation -> Jobs wiring exists; job_id is a loose column the
+// production path may set later through its own approved increment.
+// ---------------------------------------------------------------------------
+
+/** DM section 32.3: the complete generation lifecycle (all terminal). */
+export const GENERATION_STATUSES = [
+  "requested",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+] as const;
+
+/**
+ * Aggregate root 14 (DM section 13/31): one AI execution request. Status
+ * carries the DM section 32.3 state machine as an explicit CHECK (no
+ * invented states). Request provenance (prompt, seed, parameters, requested
+ * spec, estimated cost) is written at INSERT and NEVER updated by any
+ * command (invariant 3: corrections are superseding records — new
+ * generations via parent lineage, never edits). Idempotency per the
+ * API_ARCHITECTURE generation card: UNIQUE (org, request_key); a duplicate
+ * request resolves to the existing generation.
+ */
+export const generations = pgTable(
+  "generations",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    status: text("status").notNull().default("requested"),
+    /** Loose cross-module refs (approved D2) — no FKs to other families. */
+    productionId: uuid("production_id"),
+    sceneId: uuid("scene_id"),
+    shotId: uuid("shot_id"),
+    /** D2.9-4: loose job reference only — no wiring, no FK. */
+    jobId: uuid("job_id"),
+    /** Set at completion; assets stay a loose reference (no assets family yet). */
+    outputAssetVersionId: uuid("output_asset_version_id"),
+    /** Pinned Catalog resolution (invariants 8/9) — loose UUIDs, service-validated. */
+    modelId: uuid("model_id").notNull(),
+    modelVersionId: uuid("model_version_id").notNull(),
+    workflowId: uuid("workflow_id"),
+    workflowVersionId: uuid("workflow_version_id"),
+    /** Lineage DAG via parent references; parents are never mutated. */
+    parentGenerationId: uuid("parent_generation_id").references((): AnyPgColumn => generations.id, {
+      onDelete: "restrict",
+    }),
+    /** Request provenance — INSERT-only semantics, never command-mutable. */
+    inputAssetVersionIds: jsonb("input_asset_version_ids")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
+    prompt: text("prompt").notNull(),
+    negativePrompt: text("negative_prompt"),
+    seed: text("seed"),
+    parameters: jsonb("parameters").$type<Record<string, unknown>>().notNull().default({}),
+    resolution: text("resolution"),
+    fps: integer("fps"),
+    durationSeconds: numeric("duration_seconds", { precision: 10, scale: 3 }),
+    adapters: jsonb("adapters").$type<Record<string, unknown>[]>().notNull().default([]),
+    estimatedCostUsd: numeric("estimated_cost_usd", { precision: 12, scale: 4 }),
+    /** API_ARCHITECTURE generation card: idempotency key per request. */
+    requestKey: text("request_key"),
+    lastError: text("last_error"),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "generations_status_check",
+      sql`${t.status} in ('requested', 'running', 'completed', 'failed', 'cancelled')`,
+    ),
+    // API_ARCHITECTURE: duplicate generation requests dedupe on the key.
+    unique("generations_org_request_key_unique").on(t.orgId, t.requestKey),
+    index("idx_generations_org_status").on(t.orgId, t.status),
+    index("idx_generations_org_production").on(t.orgId, t.productionId),
+  ],
+).enableRLS();
+
+/**
+ * Immutable completion provenance (D2.9-1): ONE row per generation, written
+ * once by completeGeneration in the same transaction as the status
+ * transition. generation_id is the PRIMARY KEY — the uniqueness IS the
+ * one-shot guard (a second completion hits 23505). No updatedAt column.
+ * worker_ref / gpu_class are platform-agnostic identifiers — never
+ * credentials (invariant 4).
+ */
+export const generationProvenance = pgTable(
+  "generation_provenance",
+  {
+    generationId: uuid("generation_id")
+      .primaryKey()
+      .references(() => generations.id, { onDelete: "restrict" }),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    /** Output storage reference — the existing `generations` key namespace. */
+    outputStorageKey: text("output_storage_key"),
+    outputChecksum: text("output_checksum"),
+    outputByteSize: bigint("output_byte_size", { mode: "number" }),
+    executedSeed: text("executed_seed"),
+    /** Platform-agnostic identifiers only — NEVER credentials (invariant 4). */
+    workerRef: text("worker_ref"),
+    gpuClass: text("gpu_class"),
+    runtimeVersion: text("runtime_version"),
+    actualCostUsd: numeric("actual_cost_usd", { precision: 12, scale: 4 }),
+    actualRuntimeSeconds: integer("actual_runtime_seconds"),
+    completedAt: timestamp("completed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("idx_generation_provenance_org").on(t.orgId)],
+).enableRLS();
+
 export type ModelRow = typeof models.$inferSelect;
 export type NewModelRow = typeof models.$inferInsert;
 export type ModelVersionRow = typeof modelVersions.$inferSelect;
@@ -852,3 +989,7 @@ export type WorkflowRow = typeof workflows.$inferSelect;
 export type NewWorkflowRow = typeof workflows.$inferInsert;
 export type WorkflowVersionRow = typeof workflowVersions.$inferSelect;
 export type NewWorkflowVersionRow = typeof workflowVersions.$inferInsert;
+export type GenerationRow = typeof generations.$inferSelect;
+export type NewGenerationRow = typeof generations.$inferInsert;
+export type GenerationProvenanceRow = typeof generationProvenance.$inferSelect;
+export type NewGenerationProvenanceRow = typeof generationProvenance.$inferInsert;

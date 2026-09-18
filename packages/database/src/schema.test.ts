@@ -9,6 +9,8 @@ import {
   computeRequirements,
   computeUsage,
   gateDecisionRecords,
+  generationProvenance,
+  generations,
   jobAttempts,
   jobDependencies,
   jobs,
@@ -38,7 +40,12 @@ import {
 describe("identity foundation (Stage 2.3, approved shape)", () => {
   it("exposes exactly the identity/tenancy tables plus platform_config", () => {
     const exported = Object.keys(schemaExports).filter(
-      (k) => !k.endsWith("Row") && !k.startsWith("New") && k !== "JOB_TYPES" && k !== "MODEL_CAPABILITY_KINDS",
+      (k) =>
+        !k.endsWith("Row") &&
+        !k.startsWith("New") &&
+        k !== "JOB_TYPES" &&
+        k !== "MODEL_CAPABILITY_KINDS" &&
+        k !== "GENERATION_STATUSES",
     );
     expect(exported.sort()).toEqual(
       [
@@ -47,6 +54,8 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         "computeRequirements",
         "computeUsage",
         "gateDecisionRecords",
+        "generationProvenance",
+        "generations",
         "jobAttempts",
         "jobDependencies",
         "jobs",
@@ -234,6 +243,11 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   workflows: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   model_versions: ["INSERT", "SELECT"],
   workflow_versions: ["INSERT", "SELECT"],
+  // Stage 2.9 (Generation Foundation): the mutable lifecycle aggregate gets
+  // full arwd; the completion-provenance record is append-only — INSERT +
+  // SELECT only (D2.9-1; the audit_log/job_attempts pattern).
+  generations: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  generation_provenance: ["INSERT", "SELECT"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -380,7 +394,6 @@ describe("domain-table guard (per approved plan)", () => {
       "scenes",
       "shots",
       "assets",
-      "generations",
       "publications",
       "aiCreators",
       "conversations",
@@ -534,5 +547,83 @@ describe("domain-table guard (per approved plan)", () => {
     expect(c.workflowId.notNull).toBe(true);
     expect(c.runtimeRef.notNull).toBe(true);
     expect(c.definition.notNull).toBe(true);
+  });
+
+  it("generations: DM section 32.3 lifecycle, loose cross-module refs, pinned catalog UUIDs", () => {
+    const c = getTableColumns(generations);
+    expect(Object.keys(c).sort()).toEqual(
+      [
+        "adapters",
+        "createdAt",
+        "durationSeconds",
+        "estimatedCostUsd",
+        "fps",
+        "id",
+        "inputAssetVersionIds",
+        "jobId",
+        "lastError",
+        "modelId",
+        "modelVersionId",
+        "negativePrompt",
+        "orgId",
+        "outputAssetVersionId",
+        "parameters",
+        "parentGenerationId",
+        "productionId",
+        "prompt",
+        "requestedAt",
+        "requestKey",
+        "resolution",
+        "sceneId",
+        "seed",
+        "startedAt",
+        "status",
+        "updatedAt",
+        "workflowId",
+        "workflowVersionId",
+        "shotId",
+      ].sort(),
+    );
+    expect(c.orgId.notNull).toBe(true);
+    expect(c.status.notNull).toBe(true);
+    expect(c.prompt.notNull).toBe(true);
+    expect(c.modelId.notNull).toBe(true);
+    expect(c.modelVersionId.notNull).toBe(true);
+    // Loose cross-module references (approved D2) — all nullable, no FKs.
+    expect(c.productionId.notNull).toBe(false);
+    expect(c.sceneId.notNull).toBe(false);
+    expect(c.shotId.notNull).toBe(false);
+    expect(c.jobId.notNull).toBe(false);
+    expect(c.outputAssetVersionId.notNull).toBe(false);
+    expect(c.workflowVersionId.notNull).toBe(false);
+    // Request-provenance columns exist and are NOT updated_at-managed.
+    expect(c.seed.notNull).toBe(false);
+    expect(c.requestedAt.notNull).toBe(true);
+    expect(c.requestKey.notNull).toBe(false);
+  });
+
+  it("generation_provenance: one-shot identity (PK = generation_id), immutable shape (no updatedAt)", () => {
+    const c = getTableColumns(generationProvenance);
+    expect(Object.keys(c).sort()).toEqual(
+      [
+        "actualCostUsd",
+        "actualRuntimeSeconds",
+        "completedAt",
+        "executedSeed",
+        "generationId",
+        "gpuClass",
+        "orgId",
+        "outputByteSize",
+        "outputChecksum",
+        "outputStorageKey",
+        "runtimeVersion",
+        "workerRef",
+      ].sort(),
+    );
+    expect("updatedAt" in c).toBe(false);
+    // generation_id IS the primary key — the one-shot completion guard.
+    expect(c.generationId.primary).toBe(true);
+    expect(c.orgId.notNull).toBe(true);
+    expect(c.completedAt.notNull).toBe(true);
   });
 });

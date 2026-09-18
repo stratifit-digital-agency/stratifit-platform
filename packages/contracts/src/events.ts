@@ -19,10 +19,15 @@ export const DomainEventName = z.enum([
   "job.completed",
   "job.failed",
   "job.cancelled",
-  // generations
+  // generations (Stage 2.9, D2.9-2: aligned additively with the documented
+  // EVENT_ARCHITECTURE catalog — started/cancelled join the pre-existing
+  // created/completed/failed; generation.superseded stays deferred with the
+  // corrections mechanism)
   "generation.created",
+  "generation.started",
   "generation.completed",
   "generation.failed",
+  "generation.cancelled",
   // assets
   "asset.created",
   "asset.approved",

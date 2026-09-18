@@ -62,6 +62,9 @@ importers:
       '@stratifit/events':
         specifier: workspace:*
         version: link:../../packages/events
+      '@stratifit/generation':
+        specifier: workspace:*
+        version: link:../../services/generation
       '@stratifit/identity':
         specifier: workspace:*
         version: link:../../services/identity
@@ -89,6 +92,9 @@ importers:
       '@supabase/supabase-js':
         specifier: ^2.81.1
         version: 2.116.0
+      drizzle-orm:
+        specifier: ^0.44.7
+        version: 0.44.7(postgres@3.4.9)
       next:
         specifier: ^16.0.7
         version: 16.3.5(@types/node@24.13.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -304,6 +310,34 @@ importers:
       '@stratifit/database':
         specifier: workspace:*
         version: link:../../packages/database
+      drizzle-orm:
+        specifier: ^0.44.7
+        version: 0.44.7(postgres@3.4.9)
+    devDependencies:
+      postgres:
+        specifier: ^3.4.7
+        version: 3.4.9
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@24.13.4)(jiti@2.7.0)(lightningcss@1.32.0)(supports-color@7.2.0)(tsx@4.23.13)
+
+  services/generation:
+    dependencies:
+      '@stratifit/admin-audit':
+        specifier: workspace:*
+        version: link:../admin-audit
+      '@stratifit/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@stratifit/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@stratifit/events':
+        specifier: workspace:*
+        version: link:../../packages/events
+      '@stratifit/permissions':
+        specifier: workspace:*
+        version: link:../../packages/permissions
       drizzle-orm:
         specifier: ^0.44.7
         version: 0.44.7(postgres@3.4.9)

@@ -10,10 +10,12 @@ import { afterAll, describe, expect, it } from "vitest";
  *   - stratifit_runtime has NO privileges on platform_config;
  *   - per-table privilege map: six tenancy tables + two mutable production
  *     aggregates + the four mutable Stage 2.7 job/compute families + the two
- *     mutable Stage 2.8 catalog parents = arwd;
+ *     mutable Stage 2.8 catalog parents + the mutable Stage 2.9 generation
+ *     aggregate = arwd;
  *     audit_log + the three immutable Stage 2.6 production version families +
  *     the immutable Stage 2.7 job attempt history + the two immutable Stage
- *     2.8 catalog version families = INSERT+SELECT only
+ *     2.8 catalog version families + the immutable Stage 2.9 completion
+ *     provenance record = INSERT+SELECT only
  *     (append-only — UPDATE/DELETE must never exist);
  *   - the blanket stratifit_app default table privilege is gone (Option A);
  *   - role attributes (LOGIN-only, non-superuser, no CREATEDB/CREATEROLE/
@@ -46,10 +48,11 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "compute_usage",
     "models",
     "workflows",
+    "generations",
   ] as const;
 
-  // Immutable families (D2.6-4 / D2.7-4 / Stage 2.8 catalog versions):
-  // INSERT + SELECT, never UPDATE/DELETE.
+  // Immutable families (D2.6-4 / D2.7-4 / Stage 2.8 catalog versions /
+  // Stage 2.9 completion provenance): INSERT + SELECT, never UPDATE/DELETE.
   const immutableTables = [
     "production_plan_versions",
     "gate_decision_records",
@@ -57,6 +60,7 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "job_attempts",
     "model_versions",
     "workflow_versions",
+    "generation_provenance",
   ] as const;
 
   it("grants stratifit_runtime INSERT+SELECT only on the immutable families", async () => {
