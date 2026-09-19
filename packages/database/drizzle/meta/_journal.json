@@ -162,6 +162,34 @@
       "when": 1789760238594,
       "tag": "0022_qc_grants_policies",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1789812768311,
+      "tag": "0023_publications_foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7.3",
+      "when": 1789812809413,
+      "tag": "0024_publishing_grants_policies",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1789816786248,
+      "tag": "0025_publication_contract_step1_drops",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1789816830473,
+      "tag": "0026_publication_contract_step2_adds",
+      "breakpoints": true
     }
   ]
 }

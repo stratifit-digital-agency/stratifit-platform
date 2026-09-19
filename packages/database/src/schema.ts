@@ -1386,3 +1386,169 @@ export type QcResultRow = typeof qcResults.$inferSelect;
 export type NewQcResultRow = typeof qcResults.$inferInsert;
 export type QcIssueRow = typeof qcIssues.$inferSelect;
 export type NewQcIssueRow = typeof qcIssues.$inferInsert;
+
+/**
+ * PUBLISHING bounded context (context 11, SVC section 11) — Stage 2.12.
+ *
+ * Publication (mutable aggregate root), Publication Version (immutable
+ * snapshot family), Distribution Reference (immutable attempt record).
+ * subject_ref stays a LOOSE cross-module UUID (approved D2.12-D): zero
+ * cross-context foreign keys; ownership is validated by the service through
+ * narrow read-only upstream lookup ports (production, asset_version durably;
+ * ai_creator_profile / campaign_creative structurally supported but FAIL
+ * CLOSED until their bounded contexts exist).
+ *
+ * D2.12-C: full DM section 32.6 lifecycle draft → pending_approval →
+ * approved → scheduled → publishing → published → unpublished, failure path
+ * publishing → failed, retry failed → pending_approval. A publish failure
+ * NEVER invalidates the underlying master asset/production (invariant 5) —
+ * this service owns only Publishing state.
+ */
+export const publications = pgTable(
+  "publications",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    subjectKind: text("subject_kind").notNull(),
+    subjectRef: uuid("subject_ref").notNull(),
+    platformTarget: text("platform_target").notNull(),
+    contentType: text("content_type").notNull(),
+    /** Current immutable version pointer. */
+    currentVersionId: uuid("current_version_id"),
+    /**
+     * The approval-time QC review whose approved state gates publication —
+     * the FROZEN location for the QC approval reference (the immutable
+     * version snapshot stays within its exact contracted shape).
+     */
+    qcReviewId: uuid("qc_review_id"),
+    /** DM section 32.6 lifecycle; service-enforced transitions. */
+    status: text("status").notNull().default("draft"),
+    scheduledFor: timestamp("scheduled_for", { withTimezone: true }),
+    /** Retry bookkeeping for the publishing → failed → pending_approval path. */
+    attemptCount: integer("attempt_count").notNull().default(0),
+    lastFailureReason: text("last_failure_reason"),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // One publication per subject + platform (a different platform = a new row).
+    unique("publications_org_subject_platform_unique").on(
+      t.orgId,
+      t.subjectKind,
+      t.subjectRef,
+      t.platformTarget,
+    ),
+    check(
+      "publications_subject_kind_check",
+      sql`${t.subjectKind} in ('production', 'asset_version', 'ai_creator_profile', 'campaign_creative')`,
+    ),
+    check(
+      "publications_platform_target_check",
+      sql`${t.platformTarget} in ('stratifit-media', 'youtube', 'tiktok', 'instagram', 'facebook')`,
+    ),
+    // D2.12-B: narrow Stage-1 taxonomy retained; expands with the public
+    // content model in the Audience phase.
+    check(
+      "publications_content_type_check",
+      sql`${t.contentType} in ('film', 'series', 'episode', 'short', 'music', 'documentary', 'trailer')`,
+    ),
+    // D2.12-C: exactly the DM section 32.6 states.
+    check(
+      "publications_status_check",
+      sql`${t.status} in ('draft', 'pending_approval', 'approved', 'scheduled', 'publishing', 'published', 'unpublished', 'failed')`,
+    ),
+    index("idx_publications_org_status").on(t.orgId, t.status),
+    index("idx_publications_org_subject").on(t.orgId, t.subjectKind, t.subjectRef),
+  ],
+).enableRLS();
+
+/**
+ * Immutable publication snapshot ("a correction is a NEW version, never an
+ * overwrite" — DM section 33). Created at publication create (v1) and at
+ * revise (draft-only). The shape is the EXACT frozen Stage 2.12 contract:
+ * identity, content fields, subject reference, and actor — nothing else. No
+ * qc_review_id (the approval-time QC reference lives on the publication),
+ * no subject_snapshot, no platform_target (inherited from the publication).
+ * Runtime grants: INSERT + SELECT only; live 42501 proofs for UPDATE/DELETE.
+ */
+export const publicationVersions = pgTable(
+  "publication_versions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    publicationId: uuid("publication_id")
+      .notNull()
+      .references((): AnyPgColumn => publications.id, { onDelete: "restrict" }),
+    versionNumber: integer("version_number").notNull(),
+    title: text("title").notNull(),
+    synopsis: text("synopsis"),
+    contentType: text("content_type").notNull(),
+    /** Frozen subject reference carried on the immutable snapshot. */
+    subjectKind: text("subject_kind").notNull(),
+    subjectRef: uuid("subject_ref").notNull(),
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("publication_versions_pub_version_unique").on(t.publicationId, t.versionNumber),
+    check("publication_versions_version_positive_check", sql`${t.versionNumber} > 0`),
+    check(
+      "publication_versions_content_type_check",
+      sql`${t.contentType} in ('film', 'series', 'episode', 'short', 'music', 'documentary', 'trailer')`,
+    ),
+    check(
+      "publication_versions_subject_kind_check",
+      sql`${t.subjectKind} in ('production', 'asset_version', 'ai_creator_profile', 'campaign_creative')`,
+    ),
+    index("idx_publication_versions_org_pub").on(t.orgId, t.publicationId),
+  ],
+).enableRLS();
+
+/**
+ * Immutable distribution attempt record — publication/distribution identity
+ * per delivery attempt. No provider credentials, no worker data (D2.12-F:
+ * operator-initiated synchronous delivery only in this stage). Runtime
+ * grants: INSERT + SELECT only.
+ */
+export const distributionReferences = pgTable(
+  "distribution_references",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    publicationId: uuid("publication_id")
+      .notNull()
+      .references((): AnyPgColumn => publications.id, { onDelete: "restrict" }),
+    versionId: uuid("version_id")
+      .notNull()
+      .references((): AnyPgColumn => publicationVersions.id, { onDelete: "restrict" }),
+    platformTarget: text("platform_target").notNull(),
+    /** Opaque external identity from the platform adapter; no secrets. */
+    externalRef: text("external_ref"),
+    /** FROZEN delivery outcome enum: delivered | failed (never 'succeeded'). */
+    deliveryOutcome: text("delivery_outcome").notNull(),
+    failureReason: text("failure_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("distribution_references_delivery_outcome_check", sql`${t.deliveryOutcome} in ('delivered', 'failed')`),
+    check(
+      "distribution_references_platform_target_check",
+      sql`${t.platformTarget} in ('stratifit-media', 'youtube', 'tiktok', 'instagram', 'facebook')`,
+    ),
+    index("idx_distribution_references_org_pub").on(t.orgId, t.publicationId),
+  ],
+).enableRLS();
+
+export type PublicationRow = typeof publications.$inferSelect;
+export type NewPublicationRow = typeof publications.$inferInsert;
+export type PublicationVersionRow = typeof publicationVersions.$inferSelect;
+export type NewPublicationVersionRow = typeof publicationVersions.$inferInsert;
+export type DistributionReferenceRow = typeof distributionReferences.$inferSelect;
+export type NewDistributionReferenceRow = typeof distributionReferences.$inferInsert;

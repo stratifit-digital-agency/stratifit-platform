@@ -15,9 +15,14 @@
   },
   "dependencies": {
     "@stratifit/contracts": "workspace:*",
+    "@stratifit/database": "workspace:*",
+    "@stratifit/events": "workspace:*",
+    "@stratifit/permissions": "workspace:*",
+    "drizzle-orm": "^0.44.7",
     "zod": "^4.0.17"
   },
   "devDependencies": {
+    "postgres": "^3.4.7",
     "vitest": "^3.2.4"
   }
 }

@@ -32,6 +32,9 @@ import {
   qcResults,
   qcReviewDecisions,
   qcReviews,
+  distributionReferences,
+  publicationVersions,
+  publications,
   teams,
   verificationRequirements,
   workflowVersions,
@@ -99,6 +102,9 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         "qcResults",
         "qcReviewDecisions",
         "qcReviews",
+        "distributionReferences",
+        "publicationVersions",
+        "publications",
         "teams",
         "verificationRequirements",
         "workflowVersions",
@@ -207,6 +213,9 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
       "qc_review_decisions",
       "qc_results",
       "qc_issues",
+      "publications",
+      "publication_versions",
+      "distribution_references",
     ]) {
       expect(sqlText).toContain(`ALTER TABLE "${table}" ENABLE ROW LEVEL SECURITY;`);
     }
@@ -307,6 +316,12 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   qc_review_decisions: ["INSERT", "SELECT"],
   qc_results: ["INSERT", "SELECT"],
   qc_issues: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  // Stage 2.12 (Publishing Foundation): the mutable publication aggregate
+  // gets full arwd; the immutable version snapshots and distribution
+  // references are append-only evidence — INSERT + SELECT only.
+  publications: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  publication_versions: ["INSERT", "SELECT"],
+  distribution_references: ["INSERT", "SELECT"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -452,7 +467,8 @@ describe("domain-table guard (per approved plan)", () => {
     const forbidden = [
       "scenes",
       "shots",
-      "publications",
+      // "publications" graduated to an approved bounded context in Stage
+      // 2.12 (Publishing Foundation) — it is no longer forbidden.
       "aiCreators",
       "conversations",
       "messages",
@@ -815,6 +831,47 @@ describe("domain-table guard (per approved plan)", () => {
     expect(c.resolution.notNull).toBe(true);
     expect(c.resolvedBy.notNull).toBe(false);
     expect(c.resolvedAt.notNull).toBe(false);
+  });
+
+  it("publications: mutable DM section 32.6 aggregate, loose subject_ref, one lifecycle per subject+platform, approval-time qc_review_id", () => {
+    const c = getTableColumns(publications);
+    expect(Object.keys(c).sort()).toEqual(
+      ["attemptCount", "contentType", "createdAt", "currentVersionId", "id", "lastAttemptAt", "lastFailureReason", "orgId", "platformTarget", "qcReviewId", "scheduledFor", "status", "subjectKind", "subjectRef", "updatedAt"].sort(),
+    );
+    expect(c.subjectRef.notNull).toBe(true);
+    expect(c.status.notNull).toBe(true);
+    expect(c.status.hasDefault).toBe(true);
+    // The FROZEN approval-time QC reference lives on the publication and is
+    // nullable until approve stamps it.
+    expect(c.qcReviewId.notNull).toBe(false);
+  });
+
+  it("publication_versions: immutable snapshot family (no updatedAt), EXACT frozen shape (no qc_review_id, no subject_snapshot)", () => {
+    const c = getTableColumns(publicationVersions);
+    expect(Object.keys(c).sort()).toEqual(
+      ["contentType", "createdAt", "createdBy", "id", "orgId", "publicationId", "subjectKind", "subjectRef", "synopsis", "title", "versionNumber"].sort(),
+    );
+    expect("updatedAt" in c).toBe(false);
+    expect("qcReviewId" in c).toBe(false);
+    expect("subjectSnapshot" in c).toBe(false);
+    expect("platformTarget" in c).toBe(false);
+    expect(c.title.notNull).toBe(true);
+    expect(c.versionNumber.notNull).toBe(true);
+    expect(c.subjectKind.notNull).toBe(true);
+    expect(c.subjectRef.notNull).toBe(true);
+  });
+
+  it("distribution_references: immutable attempt record (no updatedAt), FROZEN delivery_outcome delivered|failed, no credentials", () => {
+    const c = getTableColumns(distributionReferences);
+    expect(Object.keys(c).sort()).toEqual(
+      ["createdAt", "deliveryOutcome", "externalRef", "failureReason", "id", "orgId", "platformTarget", "publicationId", "versionId"].sort(),
+    );
+    expect("updatedAt" in c).toBe(false);
+    expect("status" in c).toBe(false);
+    expect(c.deliveryOutcome.notNull).toBe(true);
+    expect(c.versionId.notNull).toBe(true);
+    expect(c.externalRef.notNull).toBe(false);
+    expect(c.failureReason.notNull).toBe(false);
   });
 
   it("asset migrations: lineage derivation kinds match DM section 12 exactly; RLS enabled", () => {

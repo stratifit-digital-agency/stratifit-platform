@@ -50,6 +50,7 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "workflows",
     "generations",
     "assets",
+    "publications",
     "qc_checks",
     "qc_reviews",
     "qc_issues",
@@ -68,6 +69,8 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "generation_provenance",
     "asset_versions",
     "asset_lineage",
+    "publication_versions",
+    "distribution_references",
     "qc_review_decisions",
     "qc_results",
   ] as const;

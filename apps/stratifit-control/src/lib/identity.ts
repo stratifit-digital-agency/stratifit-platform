@@ -44,8 +44,14 @@ import {
   createQcService,
   type QcService,
 } from "@stratifit/quality-control";
+import {
+  createDrizzlePublishingRepository,
+  createPublishingService,
+  DurableStratifitMediaAdapter,
+  type PublishingService,
+} from "@stratifit/publishing-engine";
 import { createDatabase } from "@stratifit/database";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { createControlCookieClient, controlAuthEnv } from "@/lib/supabase-server";
 
 /**
@@ -78,6 +84,7 @@ let services: {
   generation: GenerationService;
   assets: AssetService;
   qualityControl: QcService;
+  publishing: PublishingService;
 } | null = null;
 
 const buildServices = () => {
@@ -359,6 +366,119 @@ const buildServices = () => {
           return row ? { kind: "production" as const, production: row } : null;
         },
       }),
+      // Stage 2.12: the durable Publishing service shares the SAME Drizzle
+      // pool and the SAME audit transaction writer (D2.4-1 reused). Subject
+      // resolution (D2.12-D) uses narrow READ-ONLY org-conditioned lookups
+      // over productions/asset_versions; ai_creator_profile/
+      // campaign_creative FAIL CLOSED. The QC handoff (plan section 9)
+      // delegates to qualityControl's eligibility evaluation — publishing
+      // consumes the verdict only (zero QC→Asset coupling preserved). The
+      // rights seam (D2.12-A) is UNWIRED — no Rights implementation or
+      // stub exists in Stage 2.12; the service treats an absent port as a
+      // vacuous pass. A future Rights stage injects the adapter here.
+      publishing: createPublishingService({
+        repository: createDrizzlePublishingRepository({
+          db,
+          auditWriter: {
+            appendWithin: (tx, entry) =>
+              writer.appendWithin(tx, {
+                actorId: entry.actorId,
+                action: entry.action,
+                subjectKind: entry.targetType,
+                subjectId: entry.targetId,
+                organizationId: entry.organizationId ?? null,
+                correlationId: entry.correlationId ?? null,
+                causationId: entry.causationId ?? null,
+                payload: entry.metadata ?? {},
+              }),
+          },
+        }),
+        resolveSubject: async (orgId, subjectKind, subjectRef) => {
+          const { assetVersions, productions } = await import("@stratifit/database");
+          if (subjectKind === "ai_creator_profile" || subjectKind === "campaign_creative") {
+            return { kind: subjectKind, unsupported: true } as const;
+          }
+          if (subjectKind === "asset_version") {
+            const [row] = await db
+              .select({ id: assetVersions.id, orgId: assetVersions.orgId })
+              .from(assetVersions)
+              .where(and(eq(assetVersions.id, subjectRef), eq(assetVersions.orgId, orgId)))
+              .limit(1);
+            return row ? { kind: "asset_version" as const, orgId: row.orgId } : null;
+          }
+          const [row] = await db
+            .select({ id: productions.id, orgId: productions.orgId })
+            .from(productions)
+            .where(and(eq(productions.id, subjectRef), eq(productions.orgId, orgId)))
+            .limit(1);
+          return row ? { kind: "production" as const, orgId: row.orgId } : null;
+        },
+        resolveEligibility: async (orgId, subjectKind, subjectRef) => {
+          // QC handoff: evaluate the subject's durable QC state with the
+          // established PURE evaluatePublicationEligibility (plan section 9).
+          // No review → null → the publishing service fails closed.
+          const { evaluatePublicationEligibility } = await import("@stratifit/quality-control");
+          const { qcChecks, qcReviews, qcResults, qcIssues } = await import("@stratifit/database");
+          const [review] = await db
+            .select()
+            .from(qcReviews)
+            .where(
+              and(
+                eq(qcReviews.orgId, orgId),
+                eq(qcReviews.subjectKind, subjectKind as "production" | "asset_version"),
+                eq(qcReviews.subjectRef, subjectRef),
+              ),
+            )
+            .limit(1);
+          if (!review) return null;
+          const results = await db.select().from(qcResults).where(eq(qcResults.reviewId, review.id));
+          // Issues hang off RESULTS, not the review — collect them per result.
+          const issuesByResult = results.length
+            ? await db
+                .select()
+                .from(qcIssues)
+                .where(inArray(qcIssues.resultId, results.map((r) => r.id)))
+            : [];
+          const checks = await db.select().from(qcChecks).where(eq(qcChecks.orgId, orgId));
+          const verdict = evaluatePublicationEligibility(
+            {
+              status: review.status as "pending" | "in_review" | "approved" | "rejected" | "changes_requested",
+              subjectKind: review.subjectKind as "production" | "asset_version",
+            },
+            results.map((r) => ({
+              id: r.id,
+              orgId: r.orgId,
+              reviewId: r.reviewId,
+              checkId: r.checkId,
+              outcome: r.outcome as "pass" | "fail" | "warn" | "skipped",
+              evaluatedBy: r.evaluatedBy as "human" | "automated",
+              ruleRef: r.ruleRef,
+              details: r.details,
+              evaluatedAt: r.evaluatedAt.toISOString(),
+            })),
+            issuesByResult.map((i) => ({
+              id: i.id,
+              orgId: i.orgId,
+              resultId: i.resultId,
+              severity: i.severity as "blocker" | "major" | "minor" | "note",
+              description: i.description,
+              resolution: i.resolution as "open" | "resolved" | "waived",
+              resolvedBy: i.resolvedBy,
+              resolvedAt: i.resolvedAt ? i.resolvedAt.toISOString() : null,
+              createdAt: i.createdAt.toISOString(),
+              updatedAt: i.updatedAt.toISOString(),
+            })),
+            checks.map((c) => ({
+              id: c.id,
+              required: c.required,
+              status: c.status as "active" | "archived",
+              appliesToKind: c.appliesToKind as "production" | "asset_version",
+            })),
+          );
+          return { ...verdict, reviewId: review.id };
+        },
+        adapters: [new DurableStratifitMediaAdapter()],
+      }),
       membership: createMembershipService({
         repository: membershipRepo,
         // D2.4-1: transaction path is primary; this fallback seam is unused
@@ -405,6 +525,8 @@ export const getAssetService = (): AssetService => buildServices().assets;
 
 /** Exposed for the Stage 2.11 /api/control/qc routes (D2.11-5). */
 export const getQcService = (): QcService => buildServices().qualityControl;
+
+export const getPublishingService = (): PublishingService => buildServices().publishing;
 
 /** Resolve the current operator server-side; null when anonymous/unprovisioned. */
 export const resolveControlOperator = async (): Promise<ControlOperatorContext | null> => {
