@@ -70,6 +70,16 @@ describe("event envelope", () => {
     expect(DomainEventEnvelope.safeParse(envelope).success).toBe(true);
   });
 
+  it("accepts publication.unpublished (D2.13-1: audience takedown consumer)", () => {
+    const envelope = makeEnvelope({
+      eventId: "evt-pub-unpub",
+      name: "publication.unpublished",
+      correlation: { publicationId: "pub_1" },
+      payload: { publicationId: "pub_1" },
+    });
+    expect(DomainEventEnvelope.safeParse(envelope).success).toBe(true);
+  });
+
   it("rejects unknown event names", () => {
     const parsed = DomainEventEnvelope.safeParse({
       eventId: "evt-2",

@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@stratifit/audience": "workspace:*",
     "@stratifit/auth": "workspace:*",
     "@stratifit/contracts": "workspace:*",
     "@stratifit/identity": "workspace:*",

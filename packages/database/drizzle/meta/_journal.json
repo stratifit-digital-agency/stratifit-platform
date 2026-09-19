@@ -190,6 +190,20 @@
       "when": 1789816830473,
       "tag": "0026_publication_contract_step2_adds",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1789825231456,
+      "tag": "0027_puzzling_the_fallen",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1789825738410,
+      "tag": "0028_public_content_grants_policies",
+      "breakpoints": true
     }
   ]
 }

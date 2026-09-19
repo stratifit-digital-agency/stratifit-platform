@@ -50,6 +50,9 @@ import {
   DurableStratifitMediaAdapter,
   type PublishingService,
 } from "@stratifit/publishing-engine";
+import { createAudienceService, createDrizzleAudienceRepository, slugify, type AudienceService } from "@stratifit/audience";
+import { InProcessEventPublisher, idempotent } from "@stratifit/events";
+import type { DomainEventEnvelope } from "@stratifit/contracts";
 import { createDatabase } from "@stratifit/database";
 import { and, eq, inArray } from "drizzle-orm";
 import { createControlCookieClient, controlAuthEnv } from "@/lib/supabase-server";
@@ -85,6 +88,7 @@ let services: {
   assets: AssetService;
   qualityControl: QcService;
   publishing: PublishingService;
+  audience: AudienceService;
 } | null = null;
 
 const buildServices = () => {
@@ -92,6 +96,28 @@ const buildServices = () => {
     const db = createDatabase(process.env.DATABASE_URL as string);
     const audit = createAdminAuditService({ repository: createDrizzleAuditRepository({ db }) });
     const writer = audit.transactionWriter();
+    // Stage 2.13 (D2.13 §6): exactly ONE shared in-process event bus. The
+    // in-process transport cannot cross process boundaries, so the emitting
+    // (publishing) and consuming (audience projection) sides must share this
+    // instance in the Control composition. Envelopes arrive post-commit (the
+    // publishing service emits only after its transaction commits); each
+    // consumer runs in its own transaction. No outbox, no broker, no worker.
+    // InProcessEventPublisher takes its handler list immutably, so the
+    // audience handler is declared here (before the bus), closing over the
+    // lazily built `services` slot; the bus is constructed with the handler
+    // and the publishing service below emits onto THIS instance.
+    const audienceHandler = idempotent(async (envelope: DomainEventEnvelope) => {
+      const result =
+        envelope.name === "publication.published"
+          ? await services!.audience.projectPublished({ envelope })
+          : envelope.name === "publication.unpublished"
+            ? await services!.audience.unpublishContent({ envelope })
+            : null;
+      if (result && !result.ok) {
+        console.error("[audience] consumer failed:", envelope.name, result.error.reason, result.error.message);
+      }
+    });
+    const eventBus = new InProcessEventPublisher([audienceHandler]);
     // Stage 2.9: narrow Catalog resolution ports over the SAME pool — the
     // generation service reads (never writes) the Stage 2.8 catalog families
     // through these structural seams (SVC sanctioned import: generation ──► ai,
@@ -478,6 +504,32 @@ const buildServices = () => {
           return { ...verdict, reviewId: review.id };
         },
         adapters: [new DurableStratifitMediaAdapter()],
+        // Stage 2.13: publishing emits onto the SHARED bus (post-commit).
+        publisher: eventBus,
+      }),
+      // Stage 2.13: the audience PUBLIC CONTENT projector consumes the
+      // committed publishing facts on the SAME bus. projectPublished is
+      // idempotent by publication_version_id (payload.versionId, verified
+      // BUILD STEP 0); unpublishContent flips the projection only. The
+      // consumer owns its transactions and the same-tx audit seam.
+      audience: createAudienceService({
+        repository: createDrizzleAudienceRepository({
+          db,
+          auditWriter: {
+            appendWithin: (tx, entry) =>
+              writer.appendWithin(tx as Parameters<typeof writer.appendWithin>[0], {
+                actorId: entry.actorId,
+                action: entry.action,
+                subjectKind: entry.subjectKind,
+                subjectId: entry.subjectId,
+                organizationId: entry.organizationId ?? null,
+                correlationId: entry.correlationId ?? null,
+                causationId: entry.causationId ?? null,
+                payload: entry.payload ?? {},
+              }),
+          },
+        }),
+        slugify,
       }),
       membership: createMembershipService({
         repository: membershipRepo,

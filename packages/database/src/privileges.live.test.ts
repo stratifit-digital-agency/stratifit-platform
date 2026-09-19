@@ -51,6 +51,7 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "generations",
     "assets",
     "publications",
+    "public_content",
     "qc_checks",
     "qc_reviews",
     "qc_issues",

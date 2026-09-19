@@ -415,13 +415,17 @@ describe("lifecycle (DM section 32.6 with the approved correction)", () => {
     if (!publish.ok) expect(publish.error.reason).toBe("invalid_transition");
   });
 
-  it("unpublish sends published → unpublished (terminal) and emits no event", async () => {
+  it("unpublish sends published → unpublished (terminal) and emits publication.unpublished (D2.13-1)", async () => {
     const pub = await prepareScheduled(service, store);
     await service.publish(makeActor(), pub.id);
     const result = await service.unpublish(makeActor(), pub.id);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.status).toBe("unpublished");
-    expect(events.map((e) => e.name)).toEqual(["publication.created", "publication.published"]);
+    expect(events.map((e) => e.name)).toEqual([
+      "publication.created",
+      "publication.published",
+      "publication.unpublished",
+    ]);
     const again = await service.submit(makeActor(), pub.id);
     expect(again.ok).toBe(false);
     if (!again.ok) expect(again.error.reason).toBe("invalid_transition");

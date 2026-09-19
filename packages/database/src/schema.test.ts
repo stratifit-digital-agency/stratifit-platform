@@ -35,6 +35,7 @@ import {
   distributionReferences,
   publicationVersions,
   publications,
+  publicContent,
   teams,
   verificationRequirements,
   workflowVersions,
@@ -102,6 +103,7 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         "qcResults",
         "qcReviewDecisions",
         "qcReviews",
+        "publicContent",
         "distributionReferences",
         "publicationVersions",
         "publications",
@@ -322,6 +324,10 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   publications: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   publication_versions: ["INSERT", "SELECT"],
   distribution_references: ["INSERT", "SELECT"],
+  // Stage 2.13 (Public Content Foundation): a MUTABLE projection aggregate
+  // whose only sanctioned mutation is the published→unpublished status flip
+  // (plus timestamps) — full arwd, org-scoped RLS runtime_all.
+  public_content: ["DELETE", "INSERT", "SELECT", "UPDATE"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -894,5 +900,54 @@ describe("domain-table guard (per approved plan)", () => {
       ["public.assets", "public.asset_versions", "public.asset_lineage"].some((t) => p.includes(`ON ${t}`)),
     );
     for (const p of assetPolicies) expect(p).toContain("TO stratifit_runtime");
+  });
+
+  it("public_content: Stage 2.13 projection aggregate — frozen shape, UNIQUE(slug)+UNIQUE(publication_version_id), FK RESTRICT to the publishing family, RLS enabled", () => {
+    const c = getTableColumns(publicContent);
+    expect(Object.keys(c).sort()).toEqual(
+      [
+        "categories", "contentType", "createdAt", "creatorProfileRef", "durationSeconds",
+        "episodeNumber", "id", "mediaRefs", "orgId", "publicationId", "publicationVersionId",
+        "publishedAt", "seriesRef", "slug", "status", "synopsis", "title", "updatedAt",
+      ].sort(),
+    );
+    expect(c.slug.notNull).toBe(true);
+    expect(c.publicationVersionId.notNull).toBe(true);
+    expect(c.publicationId.notNull).toBe(true);
+    expect(c.orgId.notNull).toBe(true);
+    expect(c.title.notNull).toBe(true);
+    expect(c.publishedAt.notNull).toBe(true);
+    expect(c.status.notNull).toBe(true);
+    expect(c.status.hasDefault).toBe(true);
+    expect(c.synopsis.notNull).toBe(false);
+    expect(c.creatorProfileRef).toBeDefined();
+    expect(c.creatorProfileRef!.notNull).toBe(false);
+    expect(c.seriesRef!.notNull).toBe(false);
+    expect(c.episodeNumber!.notNull).toBe(false);
+    expect(c.durationSeconds!.notNull).toBe(false);
+    const migrationsDir = fileURLToPath(new URL("../drizzle/", import.meta.url));
+    const sqlText = readdirSync(migrationsDir)
+      .filter((f) => f.endsWith(".sql"))
+      .sort()
+      .map((f) => readFileSync(`${migrationsDir}/${f}`, "utf8"))
+      .join("\n");
+    // D2.13-2 global slug uniqueness + D2.13-4 idempotency uniqueness.
+    expect(sqlText).toContain('UNIQUE("slug")');
+    expect(sqlText).toContain('UNIQUE("publication_version_id")');
+    for (const fk of [
+      "public_content_org_id_organizations_id_fk",
+      "public_content_publication_id_publications_id_fk",
+      "public_content_publication_version_id_publication_versions_id_fk",
+    ]) {
+      expect(sqlText).toContain(fk);
+      const fkDef = sqlText.slice(sqlText.indexOf(fk), sqlText.indexOf(fk) + 220);
+      expect(fkDef).toContain("ON DELETE restrict");
+    }
+    // RLS enabled in 0027; runtime_all policy TO stratifit_runtime in 0028.
+    expect(sqlText).toContain('ALTER TABLE "public_content" ENABLE ROW LEVEL SECURITY;');
+    const policies = sqlText.match(/CREATE POLICY[^;]+;/g) ?? [];
+    const pcPolicies = policies.filter((p) => p.includes("ON public.public_content"));
+    expect(pcPolicies).toHaveLength(1);
+    expect(pcPolicies[0]).toContain("TO stratifit_runtime");
   });
 });

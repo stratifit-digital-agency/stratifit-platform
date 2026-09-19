@@ -1552,3 +1552,80 @@ export type PublicationVersionRow = typeof publicationVersions.$inferSelect;
 export type NewPublicationVersionRow = typeof publicationVersions.$inferInsert;
 export type DistributionReferenceRow = typeof distributionReferences.$inferSelect;
 export type NewDistributionReferenceRow = typeof distributionReferences.$inferInsert;
+
+/**
+ * Public Media & Audience — context 12, aggregate 20 (Stage 2.13).
+ *
+ * Durable PUBLIC CONTENT projection. INVARIANT 10: public content must
+ * originate from an approved publication — there is no second content
+ * universe. Rows are created ONLY by the audience consumer of
+ * `publication.published` (idempotent, keyed by publication_version_id) and
+ * retired from public reads via the `publication.unpublished` consumer
+ * (D2.13-1). The aggregate is mutable ONLY through the status flip
+ * (published -> unpublished); version snapshots themselves are immutable, so
+ * a correction creates a new publication version and a new projection.
+ */
+export const publicContent = pgTable(
+  "public_content",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    /** Authoritative same-database publishing references (D2.13-4). */
+    publicationId: uuid("publication_id")
+      .notNull()
+      .references((): AnyPgColumn => publications.id, { onDelete: "restrict" }),
+    /** Projection idempotency key — one version, one row, one slug, forever. */
+    publicationVersionId: uuid("publication_version_id")
+      .notNull()
+      .references((): AnyPgColumn => publicationVersions.id, { onDelete: "restrict" }),
+    /** Public URL address. GLOBALLY unique (D2.13-2); never contains internal IDs or org identity. */
+    slug: text("slug").notNull(),
+    /** DM section 20 public content taxonomy (broader than the publication enum, D2.13-3). */
+    contentType: text("content_type").notNull(),
+    title: text("title").notNull(),
+    synopsis: text("synopsis"),
+    /**
+     * Public asset-version METADATA references only — ids and coarse
+     * classification, never binary paths/URLs (binaries stay behind storage).
+     * Enrichment from asset metadata is a deferred seam; defaults to {}.
+     */
+    mediaRefs: jsonb("media_refs").notNull().default({}),
+    durationSeconds: integer("duration_seconds"),
+    /** People (context 4) is not durable yet — reserved, never exposed. */
+    creatorProfileRef: uuid("creator_profile_ref"),
+    /** Series/episode navigation reserved (D2.13-3); series content is not creatable yet. */
+    seriesRef: uuid("series_ref"),
+    episodeNumber: integer("episode_number"),
+    categories: jsonb("categories").notNull().default([]),
+    /** Publish-time fact from the committed publication.published envelope. */
+    publishedAt: timestamp("published_at", { withTimezone: true }).notNull(),
+    /** Public visibility: listContent/getContentBySlug filter on published. */
+    status: text("status").notNull().default("published"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "public_content_content_type_check",
+      sql`${t.contentType} in ('film', 'movie', 'series', 'episode', 'short', 'comedy', 'skit', 'music', 'music-video', 'documentary', 'live-program', 'trailer', 'advertisement')`,
+    ),
+    check("public_content_status_check", sql`${t.status} in ('published', 'unpublished')`),
+    check(
+      "public_content_duration_check",
+      sql`${t.durationSeconds} is null or ${t.durationSeconds} >= 0`,
+    ),
+    check(
+      "public_content_episode_number_check",
+      sql`${t.episodeNumber} is null or ${t.episodeNumber} >= 0`,
+    ),
+    unique("public_content_slug_unique").on(t.slug),
+    unique("public_content_publication_version_unique").on(t.publicationVersionId),
+    index("idx_public_content_org_status").on(t.orgId, t.status),
+    index("idx_public_content_publication").on(t.publicationId),
+  ],
+).enableRLS();
+
+export type PublicContentRow = typeof publicContent.$inferSelect;
+export type NewPublicContentRow = typeof publicContent.$inferInsert;

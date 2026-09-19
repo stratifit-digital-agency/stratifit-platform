@@ -105,7 +105,7 @@ export const createPublishingService = (deps: PublishingServiceDeps): Publishing
     deps.adapters.find((a) => a.target === target);
 
   const emit = async (
-    name: "publication.created" | "publication.published" | "publication.failed",
+    name: "publication.created" | "publication.published" | "publication.failed" | "publication.unpublished",
     payload: Record<string, unknown>,
     correlation: { organizationId: string; publicationId?: string },
   ) => {
@@ -581,6 +581,13 @@ export const createPublishingService = (deps: PublishingServiceDeps): Publishing
       if (updated instanceof ConflictSignal) {
         return err("conflict", "publication changed concurrently; re-read and retry");
       }
+      // D2.13-1: the audience consumer needs the takedown fact to retire the
+      // public projection — emitted POST-COMMIT like every publishing event.
+      await emit(
+        "publication.unpublished",
+        { publicationId: updated.id },
+        { organizationId: actor.organizationId, publicationId: updated.id },
+      );
       return ok(updated);
     },
 

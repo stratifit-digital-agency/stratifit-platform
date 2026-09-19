@@ -41,10 +41,15 @@ export const DomainEventName = z.enum([
   "qc.requested",
   "qc.approved",
   "qc.rejected",
-  // publishing
+  // publishing (Stage 2.13, D2.13-1: unpublished joins the pre-existing
+  // created/published/failed — the pre-approved EVENT_ARCHITECTURE
+  // "Approved extensions from DOMAIN_MODEL §35" name; the audience consumer
+  // needs it to retire projected public content on takedown, otherwise the
+  // projection goes stale. Additive only.)
   "publication.created",
   "publication.published",
   "publication.failed",
+  "publication.unpublished",
   // messaging
   "conversation.created",
   "message.created",

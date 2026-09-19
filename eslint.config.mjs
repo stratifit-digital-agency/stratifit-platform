@@ -47,6 +47,9 @@ const elementTypes = [
   { type: "internal-service", pattern: "services/production-engine/**", mode: "full" },
   // Public-safe domain services (published-content read API today).
   { type: "public-service", pattern: "services/publishing-engine/**", mode: "full" },
+  // Stage 2.13 (D2.13-5): audience owns the public-content projection and
+  // its public-safe read API (Media composes THIS fragment).
+  { type: "public-service", pattern: "services/audience/**", mode: "full" },
   { type: "control-app", pattern: "apps/stratifit-control/**", mode: "full" },
   { type: "media-app", pattern: "apps/stratifit-media/**", mode: "full" },
 ];
