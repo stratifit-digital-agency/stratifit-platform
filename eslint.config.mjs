@@ -50,6 +50,9 @@ const elementTypes = [
   // Stage 2.13 (D2.13-5): audience owns the public-content projection and
   // its public-safe read API (Media composes THIS fragment).
   { type: "public-service", pattern: "services/audience/**", mode: "full" },
+  // Stage 2.15 (D2.15-5): social owns the five-family audience social graph
+  // (likes/saves/follows/comments/shares) and its public-safe read API.
+  { type: "public-service", pattern: "services/social/**", mode: "full" },
   { type: "control-app", pattern: "apps/stratifit-control/**", mode: "full" },
   { type: "media-app", pattern: "apps/stratifit-media/**", mode: "full" },
 ];

@@ -2,6 +2,8 @@ import { headers } from "next/headers";
 import { resolveMediaIdentity } from "@/lib/identity";
 import { getProgress, toProgressView } from "@/lib/progress";
 import { publicContentReader } from "@/lib/content";
+import { principalOf, listFollows, listLikes, listSaves } from "@/lib/social";
+import { SocialActions } from "@/app/components/social-actions";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +25,19 @@ export default async function HomePage() {
   const identity = await resolveMediaIdentity(
     new Request("http://local/media-home", { headers: await headers() }),
   );
+
+  // Stage 2.15 minimal social affordances (own-state only, server-derived):
+  // liked/saved sets for the card toggles + the active following list.
+  const principal = identity ? principalOf(identity) : null;
+  const [likedSet, savedSet, follows] = principal
+    ? await Promise.all([
+        listLikes(principal, 200),
+        listSaves(principal, 200),
+        listFollows(principal, 12),
+      ])
+    : [[], [], []];
+  const likedRefs = new Set(likedSet.map((r) => r.contentRef));
+  const savedRefs = new Set(savedSet.map((r) => r.contentRef));
 
   const progressItems = identity
     ? (await getProgress(identity.userId, 12))
@@ -82,11 +97,34 @@ export default async function HomePage() {
               <li key={c.contentRef} data-slug={c.slug} className="rounded-lg border border-gray-200 p-5">
                 <h3 className="font-semibold">{c.title}</h3>
                 <p className="mt-1 text-sm text-gray-500">{c.contentType}</p>
+                {principal ? (
+                  <SocialActions
+                    contentRef={c.contentRef}
+                    initiallyLiked={likedRefs.has(c.contentRef)}
+                    initiallySaved={savedRefs.has(c.contentRef)}
+                  />
+                ) : null}
               </li>
             ))}
           </ul>
         )}
       </section>
+
+      {principal && follows.length > 0 ? (
+        <section className="mt-8" data-testid="following">
+          <h2 className="text-xl font-semibold">Following</h2>
+          <ul className="mt-4 flex flex-wrap gap-2">
+            {follows.map((f) => (
+              <li
+                key={f.followeeRef}
+                className="rounded-full border border-gray-200 px-3 py-1 text-sm text-gray-600"
+              >
+                member · {f.followeeKind}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </main>
   );
 }

@@ -17,6 +17,7 @@
     "@stratifit/contracts": "workspace:*",
     "@stratifit/identity": "workspace:*",
     "@stratifit/publishing-engine": "workspace:*",
+    "@stratifit/social": "workspace:*",
     "@stratifit/ui": "workspace:*",
     "@supabase/ssr": "^0.7.0",
     "next": "^16.0.7",

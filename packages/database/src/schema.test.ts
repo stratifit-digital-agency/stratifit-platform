@@ -9,6 +9,11 @@ import {
   assets,
   auditLog,
   audienceUsers,
+  comments,
+  followGraph,
+  likes,
+  saves,
+  shares,
   computeRequirements,
   computeUsage,
   gateDecisionRecords,
@@ -111,6 +116,11 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         "teams",
         "verificationRequirements",
         "watchProgress",
+        "likes",
+        "saves",
+        "followGraph",
+        "comments",
+        "shares",
         "workflowVersions",
         "workflows",
       ].sort(),
@@ -334,6 +344,15 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   // upsert-per-(user, content) through the owner-scoped audience command API
   // only — full arwd, role-scoped runtime_all.
   watch_progress: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  // Stage 2.15 (Social Graph Foundation): five runtime-ARWD aggregates —
+  // likes/saves (hard-toggle), follow_graph (tombstone), comments
+  // (visibility states), shares (immutable facts). Owner/org conditioning is
+  // service-layer; D2.15-3: no social.* events.
+  likes: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  saves: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  follow_graph: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  comments: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  shares: ["DELETE", "INSERT", "SELECT", "UPDATE"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -979,6 +998,88 @@ describe("watch_progress (Stage 2.14 audience platform state)", () => {
       "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.watch_progress TO stratifit_runtime",
     ]) {
       expect(ddl).toContain(fragment);
+    }
+    expect(ddl).not.toMatch(/TO PUBLIC/);
+  });
+});
+
+describe("social graph (Stage 2.15, D2.15-1..6)", () => {
+  it("likes/saves frozen shape: idempotent (user, content) key, FK RESTRICT, RLS, no tombstone", () => {
+    for (const [tbl, table] of [
+      ["likes", likes],
+      ["saves", saves],
+    ] as const) {
+      const cols = getTableColumns(table);
+      expect(Object.keys(cols).sort()).toEqual(["audienceUserId", "contentRef", "createdAt", "id", "orgId"]);
+      expect(cols.orgId.notNull).toBe(true);
+      expect(cols.audienceUserId.notNull).toBe(true);
+      expect(cols.contentRef.notNull).toBe(true);
+      // D2.15-2: hard-delete toggles — NO tombstone column may exist.
+      expect("deletedAt" in cols).toBe(false);
+      const ddl = readdirSync(fileURLToPath(new URL("../drizzle/", import.meta.url)))
+        .filter((f) => f.startsWith("0031_") || f.startsWith("0032_"))
+        .map((f) => readFileSync(fileURLToPath(new URL(`../drizzle/${f}`, import.meta.url)), "utf8"))
+        .join("\n");
+      expect(ddl).toContain(`UNIQUE("audience_user_id","content_ref")`);
+      expect(ddl).toContain(`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.${tbl} TO stratifit_runtime`);
+    }
+  });
+
+  it("follow_graph frozen shape: tombstone, kind/target XOR checks, no-self-follow, partial active unique", () => {
+    const cols = getTableColumns(followGraph);
+    expect(Object.keys(cols).sort()).toEqual(
+      ["createdAt", "deletedAt", "followeeAudienceUserId", "followeeCreatorProfileRef", "followeeKind", "followerId", "id", "orgId", "updatedAt"],
+    );
+    // D2.15-1: creator_profile target has NO foreign key (People not durable).
+    expect(cols.followeeCreatorProfileRef.isUnique).toBe(false);
+    const ddl =
+      readdirSync(fileURLToPath(new URL("../drizzle/", import.meta.url)))
+        .filter((f) => f.startsWith("0031_"))
+        .map((f) => readFileSync(fileURLToPath(new URL(`../drizzle/${f}`, import.meta.url)), "utf8"))
+        .join("\n");
+    expect(ddl).toContain("follow_graph_no_self_follow_check");
+    expect(ddl).toContain("follow_graph_followee_kind_check");
+    expect(ddl).toContain("follow_graph_followee_target_check");
+    // D2.15-2: partial UNIQUE so a tombstoned row can be reactivated.
+    expect(ddl).toContain("WHERE \"follow_graph\".\"followee_kind\" = 'audience_user' and \"follow_graph\".\"deleted_at\" is null");
+  });
+
+  it("comments frozen shape: visibility enum, body length, parent self-FK RESTRICT", () => {
+    const cols = getTableColumns(comments);
+    expect(Object.keys(cols).sort()).toEqual(
+      ["authorId", "body", "contentRef", "createdAt", "id", "orgId", "parentCommentId", "updatedAt", "visibility"],
+    );
+    expect(cols.visibility.notNull).toBe(true);
+    const ddl =
+      readdirSync(fileURLToPath(new URL("../drizzle/", import.meta.url)))
+        .filter((f) => f.startsWith("0031_"))
+        .map((f) => readFileSync(fileURLToPath(new URL(`../drizzle/${f}`, import.meta.url)), "utf8"))
+        .join("\n");
+    expect(ddl).toContain("comments_visibility_check");
+    expect(ddl).toContain("comments_body_length_check");
+    expect(ddl).toContain("comments_parent_comment_id_comments_id_fk");
+  });
+
+  it("shares frozen shape: narrow channel enum, immutable-fact shape (no unique on user+content)", () => {
+    const cols = getTableColumns(shares);
+    expect(Object.keys(cols).sort()).toEqual(["audienceUserId", "channel", "contentRef", "createdAt", "id", "orgId"]);
+    const ddl =
+      readdirSync(fileURLToPath(new URL("../drizzle/", import.meta.url)))
+        .filter((f) => f.startsWith("0031_"))
+        .map((f) => readFileSync(fileURLToPath(new URL(`../drizzle/${f}`, import.meta.url)), "utf8"))
+        .join("\n");
+    expect(ddl).toContain("shares_channel_check");
+    // D2.15-6: no arbitrary channel strings beyond the two frozen values.
+    expect(ddl).toContain("('copy_link', 'external')");
+    // Immutable facts: duplicates are distinct — no uniqueness constraint.
+    expect(ddl).not.toContain("shares_user_content_unique");
+  });
+
+  it("0032 grants ARWD to all five social tables and no PUBLIC privileges", () => {
+    const ddl = readFileSync(fileURLToPath(new URL("../drizzle/0032_social_grants_policies.sql", import.meta.url)), "utf8");
+    for (const tbl of ["likes", "saves", "follow_graph", "comments", "shares"]) {
+      expect(ddl).toContain(`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.${tbl} TO stratifit_runtime`);
+      expect(ddl).toContain(`CREATE POLICY runtime_all ON public.${tbl} FOR ALL TO stratifit_runtime USING (true) WITH CHECK (true)`);
     }
     expect(ddl).not.toMatch(/TO PUBLIC/);
   });

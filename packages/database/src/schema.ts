@@ -1671,3 +1671,215 @@ export const watchProgress = pgTable(
 
 export type WatchProgressRow = typeof watchProgress.$inferSelect;
 export type NewWatchProgressRow = typeof watchProgress.$inferInsert;
+
+/**
+ * Social Graph — context 13 (Stage 2.15, D2.15-1..6).
+ *
+ * LIKE — owner-scoped audience-platform state over PUBLISHED public content.
+ * Hard-delete toggle semantics (D2.15-2): unlike removes the row; re-like
+ * creates a fresh active relationship. UNIQUE(audience_user_id, content_ref)
+ * makes the like command idempotent (duplicate = no-op). Rows reference
+ * public content and audience identities only — never production internals.
+ */
+export const likes = pgTable(
+  "likes",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    /** Owner — server-derived from the authenticated audience session. */
+    audienceUserId: uuid("audience_user_id")
+      .notNull()
+      .references((): AnyPgColumn => audienceUsers.id, { onDelete: "restrict" }),
+    /** Target — published public content only (service-enforced). */
+    contentRef: uuid("content_ref")
+      .notNull()
+      .references((): AnyPgColumn => publicContent.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("likes_user_content_unique").on(t.audienceUserId, t.contentRef),
+    index("idx_likes_content").on(t.contentRef),
+    index("idx_likes_user").on(t.audienceUserId),
+  ],
+).enableRLS();
+
+export type LikeRow = typeof likes.$inferSelect;
+export type NewLikeRow = typeof likes.$inferInsert;
+
+/**
+ * Social Graph — context 13 (Stage 2.15).
+ *
+ * SAVE — bookmark with hard-delete toggle semantics (D2.15-2), identical
+ * shape/lifecycle to Like. Owner-scoped; UNIQUE(audience_user_id,
+ * content_ref) idempotency key.
+ */
+export const saves = pgTable(
+  "saves",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    audienceUserId: uuid("audience_user_id")
+      .notNull()
+      .references((): AnyPgColumn => audienceUsers.id, { onDelete: "restrict" }),
+    contentRef: uuid("content_ref")
+      .notNull()
+      .references((): AnyPgColumn => publicContent.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("saves_user_content_unique").on(t.audienceUserId, t.contentRef),
+    index("idx_saves_content").on(t.contentRef),
+    index("idx_saves_user").on(t.audienceUserId),
+  ],
+).enableRLS();
+
+export type SaveRow = typeof saves.$inferSelect;
+export type NewSaveRow = typeof saves.$inferInsert;
+
+/**
+ * Social Graph — context 13 (Stage 2.15).
+ *
+ * FOLLOW — asymmetric directed relationship with TOMBSTONE semantics
+ * (D2.15-2): unfollow sets deleted_at; re-follow reactivates the same row by
+ * clearing deleted_at (the UNIQUE constraints are partial on deleted_at IS
+ * NULL so a tombstoned row never blocks reactivation). Audience-user targets
+ * are live; creator-profile targets are STRUCTURALLY supported (kind CHECK)
+ * but FAIL CLOSED at the service until People is durable (D2.15-1) —
+ * followee_creator_profile_ref deliberately has NO foreign key.
+ */
+export const followGraph = pgTable(
+  "follow_graph",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    /** Follower — server-derived from the authenticated audience session. */
+    followerId: uuid("follower_id")
+      .notNull()
+      .references((): AnyPgColumn => audienceUsers.id, { onDelete: "restrict" }),
+    followeeKind: text("followee_kind").notNull(),
+    /** Populated iff followee_kind = 'audience_user'. */
+    followeeAudienceUserId: uuid("followee_audience_user_id").references(
+      (): AnyPgColumn => audienceUsers.id,
+      { onDelete: "restrict" },
+    ),
+    /** Populated iff followee_kind = 'creator_profile'; no FK (People not durable). */
+    followeeCreatorProfileRef: uuid("followee_creator_profile_ref"),
+    /** TOMBSTONE (D2.15-2) — non-null means the relationship is inactive. */
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "follow_graph_followee_kind_check",
+      sql`${t.followeeKind} in ('audience_user', 'creator_profile')`,
+    ),
+    check(
+      "follow_graph_followee_target_check",
+      sql`(${t.followeeKind} = 'audience_user' and ${t.followeeAudienceUserId} is not null and ${t.followeeCreatorProfileRef} is null)
+          or (${t.followeeKind} = 'creator_profile' and ${t.followeeAudienceUserId} is null and ${t.followeeCreatorProfileRef} is not null)`,
+    ),
+    check(
+      "follow_graph_no_self_follow_check",
+      sql`${t.followeeKind} <> 'audience_user' or ${t.followeeAudienceUserId} <> ${t.followerId}`,
+    ),
+    uniqueIndex("follow_graph_audience_active_unique")
+      .on(t.followerId, t.followeeAudienceUserId)
+      .where(sql`${t.followeeKind} = 'audience_user' and ${t.deletedAt} is null`),
+    uniqueIndex("follow_graph_creator_active_unique")
+      .on(t.followerId, t.followeeCreatorProfileRef)
+      .where(sql`${t.followeeKind} = 'creator_profile' and ${t.deletedAt} is null`),
+    index("idx_follow_graph_followee").on(t.followeeKind, t.followeeAudienceUserId),
+    index("idx_follow_graph_follower").on(t.followerId),
+  ],
+).enableRLS();
+
+export type FollowGraphRow = typeof followGraph.$inferSelect;
+export type NewFollowGraphRow = typeof followGraph.$inferInsert;
+
+/**
+ * Social Graph — context 13 (Stage 2.15).
+ *
+ * COMMENT — email-verified authorship over published public content with
+ * two-level threading (parent self-FK). Visibility states per D2.15-4:
+ * visible | hidden | removed. The PUBLIC query exposes only 'visible' rows;
+ * moderation transitions are a reserved seam (no Control UI in this stage).
+ * There is no hard DELETE path — 'removed' is the safe deletion state and is
+ * terminal, so parent rows always exist for their replies (parent FK is
+ * RESTRICT).
+ */
+export const comments = pgTable(
+  "comments",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    /** Author — email verification is enforced at write time by the service. */
+    authorId: uuid("author_id")
+      .notNull()
+      .references((): AnyPgColumn => audienceUsers.id, { onDelete: "restrict" }),
+    contentRef: uuid("content_ref")
+      .notNull()
+      .references((): AnyPgColumn => publicContent.id, { onDelete: "restrict" }),
+    /** Two-level threading — replies only under VISIBLE parents (service rule). */
+    parentCommentId: uuid("parent_comment_id").references((): AnyPgColumn => comments.id, {
+      onDelete: "restrict",
+    }),
+    body: text("body").notNull(),
+    /** D2.15-4: visible | hidden | removed; public reads filter to visible. */
+    visibility: text("visibility").notNull().default("visible"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("comments_visibility_check", sql`${t.visibility} in ('visible', 'hidden', 'removed')`),
+    check("comments_body_length_check", sql`char_length(${t.body}) between 1 and 2000`),
+    index("idx_comments_content_visibility").on(t.contentRef, t.visibility),
+    index("idx_comments_author").on(t.authorId),
+    index("idx_comments_parent").on(t.parentCommentId),
+  ],
+).enableRLS();
+
+export type CommentRow = typeof comments.$inferSelect;
+export type NewCommentRow = typeof comments.$inferInsert;
+
+/**
+ * Social Graph — context 13 (Stage 2.15).
+ *
+ * SHARE — IMMUTABLE fact semantics (D2.15-6): each share records (owner,
+ * content, channel) at a point in time. Duplicates are distinct facts — no
+ * uniqueness, no update path exists anywhere in the service. Channel is the
+ * narrow CHECK enum copy_link | external; no free-form strings.
+ */
+export const shares = pgTable(
+  "shares",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    audienceUserId: uuid("audience_user_id")
+      .notNull()
+      .references((): AnyPgColumn => audienceUsers.id, { onDelete: "restrict" }),
+    contentRef: uuid("content_ref")
+      .notNull()
+      .references((): AnyPgColumn => publicContent.id, { onDelete: "restrict" }),
+    channel: text("channel").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("shares_channel_check", sql`${t.channel} in ('copy_link', 'external')`),
+    index("idx_shares_user").on(t.audienceUserId),
+    index("idx_shares_content").on(t.contentRef),
+  ],
+).enableRLS();
+
+export type ShareRow = typeof shares.$inferSelect;
+export type NewShareRow = typeof shares.$inferInsert;
