@@ -12,8 +12,10 @@
  */
 import { and, desc, eq } from "drizzle-orm";
 import {
+  audienceUsers,
   createDatabase,
   publicContent,
+  watchProgress,
   type Database,
   type PublicContentRow,
 } from "@stratifit/database";
@@ -24,6 +26,7 @@ import type {
   NewPublicContentInput,
   PublicContentRecord,
   PublicContentStatus,
+  WatchProgressRecord,
 } from "./types";
 
 /** Unique-violation signal for the slug/idempotency backstops (23505). */
@@ -141,6 +144,73 @@ const mutationsFor = (exec: Database, deps: DrizzleAudienceRepositoryDeps) => {
         .returning();
       return row ? toRecord(row) : null;
     },
+    // -----------------------------------------------------------------
+    // Stage 2.14 — watch progress (owner-scoped audience state).
+    // -----------------------------------------------------------------
+    findAudienceUserById: async (
+      audienceUserId: string,
+    ): Promise<{ id: string; orgId: string } | null> => {
+      const [row] = await exec
+        .select({ id: audienceUsers.id, orgId: audienceUsers.orgId })
+        .from(audienceUsers)
+        .where(and(eq(audienceUsers.id, audienceUserId), eq(audienceUsers.status, "active")))
+        .limit(1);
+      return row ?? null;
+    },
+    findPublishedContentById: async (
+      contentRef: string,
+    ): Promise<{ id: string; orgId: string } | null> => {
+      const [row] = await exec
+        .select({ id: publicContent.id, orgId: publicContent.orgId })
+        .from(publicContent)
+        .where(and(eq(publicContent.id, contentRef), eq(publicContent.status, "published")))
+        .limit(1);
+      return row ?? null;
+    },
+    upsertProgress: async (input: {
+      orgId: string;
+      audienceUserId: string;
+      contentRef: string;
+      positionSeconds: number;
+    }): Promise<WatchProgressRecord> => {
+      // Idempotent by UNIQUE(audience_user_id, content_ref) — a repeated
+      // write UPDATES the same row (position + updatedAt) and never creates
+      // a second one.
+      const [row] = await exec
+        .insert(watchProgress)
+        .values({
+          orgId: input.orgId,
+          audienceUserId: input.audienceUserId,
+          contentRef: input.contentRef,
+          positionSeconds: input.positionSeconds,
+        })
+        .onConflictDoUpdate({
+          target: [watchProgress.audienceUserId, watchProgress.contentRef],
+          set: { positionSeconds: input.positionSeconds, updatedAt: new Date() },
+        })
+        .returning({
+          audienceUserId: watchProgress.audienceUserId,
+          contentRef: watchProgress.contentRef,
+          positionSeconds: watchProgress.positionSeconds,
+          updatedAt: watchProgress.updatedAt,
+        });
+      if (!row) throw new Error("watch progress upsert returned no row");
+      return { ...row, updatedAt: row.updatedAt.toISOString() };
+    },
+    listProgressByUser: async (audienceUserId: string, limit: number): Promise<WatchProgressRecord[]> => {
+      const rows = await exec
+        .select({
+          audienceUserId: watchProgress.audienceUserId,
+          contentRef: watchProgress.contentRef,
+          positionSeconds: watchProgress.positionSeconds,
+          updatedAt: watchProgress.updatedAt,
+        })
+        .from(watchProgress)
+        .where(eq(watchProgress.audienceUserId, audienceUserId))
+        .orderBy(desc(watchProgress.updatedAt))
+        .limit(limit);
+      return rows.map((row) => ({ ...row, updatedAt: row.updatedAt.toISOString() }));
+    },
     appendAudit: (entry: Parameters<AudienceAuditWriter["appendWithin"]>[1]) => {
       if (!deps.auditWriter) {
         throw new Error("audience audit writer not configured; mutations are not available in read-only compositions");
@@ -173,6 +243,10 @@ export const createDrizzleAudienceRepository = (deps: DrizzleAudienceRepositoryD
     listPublished: direct.listPublished,
     insertContent: (input) => direct.insertContent(input),
     setStatus: (publicationId, status) => direct.setStatus(publicationId, status),
+    findAudienceUserById: (audienceUserId) => direct.findAudienceUserById(audienceUserId),
+    findPublishedContentById: (contentRef) => direct.findPublishedContentById(contentRef),
+    upsertProgress: (input) => direct.upsertProgress(input),
+    listProgressByUser: (audienceUserId, limit) => direct.listProgressByUser(audienceUserId, limit),
     // D2.4-1: the SAME connection runs the mutation and the audit append.
     runInTransaction: async <T>(work: (tx: AudienceTransaction) => Promise<T>): Promise<T> =>
       db.transaction(async (trx) => work(transactionFor(trx as unknown as Database, deps))),

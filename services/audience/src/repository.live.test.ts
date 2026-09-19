@@ -5,7 +5,7 @@
  * proves against the LIVE remote, deliberately through the RUNTIME role
  * (DATABASE_URL / stratifit_runtime) — the privilege boundary the production
  * path actually uses (the Stage 2.7 lesson):
- *   - runtime grants map = 35 distinct tables incl. public_content (ARWD);
+ *   - runtime grants map = 36 distinct tables incl. public_content + watch_progress (ARWD);
  *   - RLS enabled with exactly the runtime_all policy TO stratifit_runtime;
  *   - UNIQUE(publication_version_id) idempotency backstop (23505);
  *   - UNIQUE(slug) global backstop (23505);
@@ -118,11 +118,13 @@ const provisionPublishedPublication = async (slugTag: string) => {
 };
 
 d("audience live proofs (runtime role)", () => {
-  it("runtime grants map = 35 distinct tables with public_content ARWD", { timeout: 30_000 }, async () => {
+  it("runtime grants map = 36 distinct tables with public_content + watch_progress ARWD", { timeout: 30_000 }, async () => {
     const [counts] = await runtimeSql!`select count(distinct table_name)::int as n from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_schema = 'public'`;
-    expect(counts!.n).toBe(35);
+    expect(counts!.n).toBe(36);
     const [pc] = await runtimeSql!`select string_agg(privilege_type, ',' order by privilege_type) as privs from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_name = 'public_content' and table_schema = 'public'`;
     expect(pc!.privs).toBe("DELETE,INSERT,SELECT,UPDATE");
+    const [wp] = await runtimeSql!`select string_agg(privilege_type, ',' order by privilege_type) as privs from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_name = 'watch_progress' and table_schema = 'public'`;
+    expect(wp!.privs).toBe("DELETE,INSERT,SELECT,UPDATE");
   });
 
   it("RLS enabled on public_content with exactly the runtime_all policy TO stratifit_runtime", { timeout: 30_000 }, async () => {

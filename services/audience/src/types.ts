@@ -168,7 +168,10 @@ export type AudienceCommandResult<T> =
 export type AudienceErrorReason =
   | "invalid_event"
   | "projection_conflict"
-  | "content_not_found";
+  | "content_not_found"
+  /** Stage 2.14: watch-progress command failures (owner-scoped audience state). */
+  | "invalid_position"
+  | "user_not_found";
 
 export const ok = <T>(value: T): AudienceCommandResult<T> => ({ ok: true, value });
 export const err = <T>(reason: AudienceErrorReason, message: string): AudienceCommandResult<T> => ({
@@ -204,6 +207,24 @@ export interface AudienceRepository {
   insertContent(input: NewPublicContentInput): Promise<PublicContentRecord>;
   /** The ONLY sanctioned mutation: published → unpublished. */
   setStatus(publicationId: string, status: PublicContentStatus): Promise<PublicContentRecord | null>;
+  // ---------------------------------------------------------------------
+  // Stage 2.14 — WATCH PROGRESS (audience-owner transactional state).
+  // Owner-scoped: every method is keyed by the SERVER-DERIVED audience
+  // userId; no client authority participates (D2.14 plan).
+  // ---------------------------------------------------------------------
+  /** The audience user's own org (server-derived owner context). */
+  findAudienceUserById(audienceUserId: string): Promise<{ readonly id: string; readonly orgId: string } | null>;
+  /** Published content lookup for the progress eligibility check. */
+  findPublishedContentById(contentRef: string): Promise<{ readonly id: string; readonly orgId: string } | null>;
+  /** Idempotent upsert keyed by UNIQUE(audience_user_id, content_ref). */
+  upsertProgress(input: {
+    readonly orgId: string;
+    readonly audienceUserId: string;
+    readonly contentRef: string;
+    readonly positionSeconds: number;
+  }): Promise<WatchProgressRecord>;
+  /** Owner-scoped list, newest first. */
+  listProgressByUser(audienceUserId: string, limit: number): Promise<readonly WatchProgressRecord[]>;
   /** D2.4-1: transaction scope for mutation + same-tx audit. */
   runInTransaction<T>(work: (tx: AudienceTransaction) => Promise<T>): Promise<T>;
 }
@@ -251,4 +272,32 @@ export interface AudienceService {
   /** Public reads (published-only). */
   listContent(): Promise<readonly PublicContentRecord[]>;
   getContentBySlug(slug: string): Promise<PublicContentRecord | null>;
+  // ---------------------------------------------------------------------
+  // Stage 2.14 — WATCH PROGRESS commands (authenticated audience only).
+  // principal.userId is ALWAYS the server-derived audience identity — the
+  // port deliberately accepts no user/org authority from callers.
+  // ---------------------------------------------------------------------
+  getProgress(principal: { readonly userId: string }, query?: { readonly limit?: number }): Promise<readonly WatchProgressRecord[]>;
+  upsertProgress(
+    principal: { readonly userId: string },
+    input: { readonly contentRef: string; readonly positionSeconds: number },
+  ): Promise<AudienceCommandResult<WatchProgressUpsertOutcome>>;
 }
+// ---------------------------------------------------------------------------
+// Stage 2.14 - WATCH PROGRESS (audience platform state, DM section 21)
+// ---------------------------------------------------------------------------
+
+/** One row of the (audience user, public content) upsert family. */
+export interface WatchProgressRecord {
+  readonly audienceUserId: string;
+  readonly contentRef: string;
+  readonly positionSeconds: number;
+  readonly updatedAt: string;
+}
+
+/** Discriminated outcome of an owner-scoped progress upsert. */
+export type WatchProgressUpsertOutcome =
+  | { readonly kind: "saved"; readonly record: WatchProgressRecord }
+  | { readonly kind: "invalid_position" }
+  | { readonly kind: "content_not_found" }
+  | { readonly kind: "user_not_found" };

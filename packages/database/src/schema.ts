@@ -1629,3 +1629,45 @@ export const publicContent = pgTable(
 
 export type PublicContentRow = typeof publicContent.$inferSelect;
 export type NewPublicContentRow = typeof publicContent.$inferInsert;
+
+
+/**
+ * Public Media & Audience — context 12 (Stage 2.14).
+ *
+ * WATCH PROGRESS — transactional per (audience user, public content):
+ * position seconds, updated at; powers "continue watching" (DM section 21,
+ * DATA_FLOW flow 17). Audience-private owner state: rows are created/updated
+ * ONLY through the audience module's owner-scoped command API — the userId
+ * is server-derived from the authenticated audience session and the org is
+ * the audience user's own org row; neither is ever client-supplied.
+ * Anonymous viewers produce no rows (watching requires no user record).
+ */
+export const watchProgress = pgTable(
+  "watch_progress",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    /** Identity-owned audience user (SVC ownership resolution); status-deactivated, never deleted (D2.14-1). */
+    audienceUserId: uuid("audience_user_id")
+      .notNull()
+      .references((): AnyPgColumn => audienceUsers.id, { onDelete: "restrict" }),
+    /** Opaque-to-audience public content reference (D2.13-4 FK precedent). */
+    contentRef: uuid("content_ref")
+      .notNull()
+      .references((): AnyPgColumn => publicContent.id, { onDelete: "restrict" }),
+    positionSeconds: integer("position_seconds").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("watch_progress_position_check", sql`${t.positionSeconds} >= 0`),
+    /** DM section 21 upsert key: one progress row per (user, content). */
+    unique("watch_progress_user_content_unique").on(t.audienceUserId, t.contentRef),
+    index("idx_watch_progress_content").on(t.contentRef),
+  ],
+).enableRLS();
+
+export type WatchProgressRow = typeof watchProgress.$inferSelect;
+export type NewWatchProgressRow = typeof watchProgress.$inferInsert;

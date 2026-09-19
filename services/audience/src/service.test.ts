@@ -27,6 +27,8 @@ import { createPublicContentReader } from "./public";
 
 class FakeStore {
   rows: PublicContentRecord[] = [];
+  progress: Array<{ audienceUserId: string; contentRef: string; positionSeconds: number; updatedAt: string }> = [];
+  users: Array<{ id: string; orgId: string; status: string }> = [];
   private seq = 0;
 
   nextId(): string {
@@ -101,6 +103,41 @@ const makeRepo = (store: FakeStore, audit: { entries: Array<{ action: string; su
   const repo: AudienceRepository = {
     ...mutations,
     runInTransaction: async <T,>(work: (t: AudienceTransaction) => Promise<T>) => work(tx),
+    // Stage 2.14 fake: in-memory (user, content) keyed progress family.
+    findAudienceUserById: async (audienceUserId: string) =>
+      store.users.find((u) => u.id === audienceUserId && u.status === "active") ?? null,
+    findPublishedContentById: async (contentRef: string) =>
+      store.rows.find((r) => r.id === contentRef && r.status === "published") ?? null,
+    upsertProgress: async (input: {
+      orgId: string;
+      audienceUserId: string;
+      contentRef: string;
+      positionSeconds: number;
+    }) => {
+      const now = new Date().toISOString();
+      const existing = store.progress.find(
+        (pr) => pr.audienceUserId === input.audienceUserId && pr.contentRef === input.contentRef,
+      );
+      if (existing) {
+        existing.positionSeconds = input.positionSeconds;
+        existing.updatedAt = now;
+        return { ...existing };
+      }
+      const created = {
+        audienceUserId: input.audienceUserId,
+        contentRef: input.contentRef,
+        positionSeconds: input.positionSeconds,
+        updatedAt: now,
+      };
+      store.progress.push(created);
+      return { ...created };
+    },
+    listProgressByUser: async (audienceUserId: string, limit: number) =>
+      store.progress
+        .filter((pr) => pr.audienceUserId === audienceUserId)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+        .slice(0, limit)
+        .map((pr) => ({ ...pr })),
   };
   return repo;
 };
@@ -366,5 +403,127 @@ describe("public projection whitelist", () => {
     });
     await service.unpublishContent({ envelope: unpublishedEvent() });
     expect(await reader.getContentBySlug("night-harbor")).toBeUndefined();
+  });
+});
+
+
+describe("watch progress (Stage 2.14, owner-scoped audience state)", () => {
+  const USER_A = "aaaaaaaa-1111-4111-8111-111111111111";
+  const USER_B = "bbbbbbbb-2222-4222-8222-222222222222";
+
+  const seedUser = (id: string) => store.users.push({ id, orgId: ORG, status: "active" });
+  const seedPublished = (id: string) =>
+    store.rows.push({
+      id,
+      orgId: ORG,
+      publicationId: PUB,
+      publicationVersionId: id,
+      slug: `slug-${id.slice(0, 8)}`,
+      contentType: "film",
+      title: "T",
+      synopsis: null,
+      mediaRefs: [],
+      publishedAt: new Date(),
+      status: "published",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as unknown as PublicContentRecord);
+
+  beforeEach(() => {
+    seedUser(USER_A);
+    seedUser(USER_B);
+    seedPublished("44444444-4444-4444-8444-444444444444");
+    seedPublished("55555555-5555-4555-8555-555555555555");
+  });
+
+  it("first write creates one row; second write updates the SAME row; repeat stays one row", async () => {
+    const contentRef = "44444444-4444-4444-8444-444444444444";
+    const r1 = await service.upsertProgress({ userId: USER_A }, { contentRef, positionSeconds: 30 });
+    expect(r1.ok).toBe(true);
+    const r2 = await service.upsertProgress({ userId: USER_A }, { contentRef, positionSeconds: 90 });
+    expect(r2.ok).toBe(true);
+    const r3 = await service.upsertProgress({ userId: USER_A }, { contentRef, positionSeconds: 90 });
+    expect(r3.ok).toBe(true);
+    const rows = await service.getProgress({ userId: USER_A });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.positionSeconds).toBe(90);
+    expect(rows[0]!.contentRef).toBe(contentRef);
+    expect(store.progress).toHaveLength(1);
+  });
+
+  it("owner-scoped: user A never reads user B rows; A cannot mutate B rows", async () => {
+    const contentRef = "44444444-4444-4444-8444-444444444444";
+    await service.upsertProgress({ userId: USER_A }, { contentRef, positionSeconds: 10 });
+    expect(await service.getProgress({ userId: USER_B })).toHaveLength(0);
+    expect(await service.getProgress({ userId: USER_A })).toHaveLength(1);
+    // B's upsert for the same content creates B's OWN row, never touches A's.
+    await service.upsertProgress({ userId: USER_B }, { contentRef, positionSeconds: 20 });
+    const aRows = await service.getProgress({ userId: USER_A });
+    expect(aRows[0]!.positionSeconds).toBe(10);
+  });
+
+  it("negative or non-integer position rejected with invalid_position", async () => {
+    const contentRef = "44444444-4444-4444-8444-444444444444";
+    const neg = await service.upsertProgress({ userId: USER_A }, { contentRef, positionSeconds: -1 });
+    expect(neg).toMatchObject({ ok: false, error: { reason: "invalid_position" } });
+    const frac = await service.upsertProgress({ userId: USER_A }, { contentRef, positionSeconds: 1.5 });
+    expect(frac).toMatchObject({ ok: false, error: { reason: "invalid_position" } });
+    expect(store.progress).toHaveLength(0);
+  });
+
+  it("unknown or malformed contentRef rejected with content_not_found", async () => {
+    const missing = await service.upsertProgress(
+      { userId: USER_A },
+      { contentRef: "99999999-9999-4999-8999-999999999999", positionSeconds: 5 },
+    );
+    expect(missing).toMatchObject({ ok: false, error: { reason: "content_not_found" } });
+    const malformed = await service.upsertProgress({ userId: USER_A }, { contentRef: "not-a-uuid", positionSeconds: 5 });
+    expect(malformed).toMatchObject({ ok: false, error: { reason: "content_not_found" } });
+  });
+
+  it("unpublished content is rejected (published-only eligibility)", async () => {
+    const contentRef = "55555555-5555-4555-8555-555555555555";
+    const row = store.rows.find((r) => r.id === contentRef)!;
+    (row as { status: string }).status = "unpublished";
+    const res = await service.upsertProgress({ userId: USER_A }, { contentRef, positionSeconds: 5 });
+    expect(res).toMatchObject({ ok: false, error: { reason: "content_not_found" } });
+  });
+
+  it("inactive/unknown audience user rejected with user_not_found (server-derived identity required)", async () => {
+    const res = await service.upsertProgress(
+      { userId: "cccccccc-3333-4333-8333-333333333333" },
+      { contentRef: "44444444-4444-4444-8444-444444444444", positionSeconds: 5 },
+    );
+    expect(res).toMatchObject({ ok: false, error: { reason: "user_not_found" } });
+    (store.users.find((u) => u.id === USER_A)! as { status: string }).status = "suspended";
+    const suspended = await service.upsertProgress(
+      { userId: USER_A },
+      { contentRef: "44444444-4444-4444-8444-444444444444", positionSeconds: 5 },
+    );
+    expect(suspended).toMatchObject({ ok: false, error: { reason: "user_not_found" } });
+  });
+
+  it("getProgress limit clamps to [1, 200] and orders newest-first", async () => {
+    const contentRefs = ["44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555"];
+    for (const [i, contentRef] of contentRefs.entries()) {
+      await service.upsertProgress({ userId: USER_A }, { contentRef, positionSeconds: i + 1 });
+    }
+    const rows = await service.getProgress({ userId: USER_A });
+    expect(rows).toHaveLength(2);
+    expect(new Date(rows[0]!.updatedAt).getTime()).toBeGreaterThanOrEqual(
+      new Date(rows[1]!.updatedAt).getTime(),
+    );
+    expect(await service.getProgress({ userId: USER_A }, { limit: 1 })).toHaveLength(1);
+    expect(await service.getProgress({ userId: USER_A }, { limit: 999 })).toHaveLength(2);
+    expect(await service.getProgress({ userId: USER_A }, { limit: 0 })).toHaveLength(1);
+  });
+
+  it("progress upserts write NO audit entries (D2.14-2)", async () => {
+    const before = audit.entries.length;
+    await service.upsertProgress(
+      { userId: USER_A },
+      { contentRef: "44444444-4444-4444-8444-444444444444", positionSeconds: 42 },
+    );
+    expect(audit.entries).toHaveLength(before);
   });
 });

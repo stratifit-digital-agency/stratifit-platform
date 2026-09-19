@@ -36,6 +36,7 @@ import {
   publicationVersions,
   publications,
   publicContent,
+  watchProgress,
   teams,
   verificationRequirements,
   workflowVersions,
@@ -109,6 +110,7 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         "publications",
         "teams",
         "verificationRequirements",
+        "watchProgress",
         "workflowVersions",
         "workflows",
       ].sort(),
@@ -328,6 +330,10 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   // whose only sanctioned mutation is the published→unpublished status flip
   // (plus timestamps) — full arwd, org-scoped RLS runtime_all.
   public_content: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  // Stage 2.14 (Audience Platform State): mutable audience-owner state,
+  // upsert-per-(user, content) through the owner-scoped audience command API
+  // only — full arwd, role-scoped runtime_all.
+  watch_progress: ["DELETE", "INSERT", "SELECT", "UPDATE"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -949,5 +955,31 @@ describe("domain-table guard (per approved plan)", () => {
     const pcPolicies = policies.filter((p) => p.includes("ON public.public_content"));
     expect(pcPolicies).toHaveLength(1);
     expect(pcPolicies[0]).toContain("TO stratifit_runtime");
+  });
+});
+describe("watch_progress (Stage 2.14 audience platform state)", () => {
+  it("frozen shape: per (user, content) upsert key, FK RESTRICT, RLS, ARWD, no PUBLIC", () => {
+    const cols = getTableColumns(watchProgress);
+    expect(Object.keys(cols).sort()).toEqual(
+      ["audienceUserId", "contentRef", "createdAt", "id", "orgId", "positionSeconds", "updatedAt"],
+    );
+    expect(cols.orgId.notNull).toBe(true);
+    expect(cols.audienceUserId.notNull).toBe(true);
+    expect(cols.contentRef.notNull).toBe(true);
+    expect(cols.positionSeconds.notNull).toBe(true);
+    const ddlDir = fileURLToPath(new URL("../drizzle/", import.meta.url));
+    const ddl = readdirSync(ddlDir)
+      .filter((f) => f.startsWith("0029_") || f.startsWith("0030_"))
+      .map((f) => readFileSync(ddlDir + "/" + f, "utf8"))
+      .join("\n");
+    for (const fragment of [
+      "REFERENCES \"public\".\"organizations\"(\"id\") ON DELETE restrict",
+      "ENABLE ROW LEVEL SECURITY",
+      "CREATE POLICY runtime_all ON public.watch_progress FOR ALL TO stratifit_runtime USING (true) WITH CHECK (true)",
+      "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.watch_progress TO stratifit_runtime",
+    ]) {
+      expect(ddl).toContain(fragment);
+    }
+    expect(ddl).not.toMatch(/TO PUBLIC/);
   });
 });

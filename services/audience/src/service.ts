@@ -236,5 +236,41 @@ export const createAudienceService = (deps: AudienceServiceDeps): AudienceServic
       const row = await repo.findBySlug(slug);
       return row && row.status === "published" ? row : null;
     },
+
+    // -------------------------------------------------------------------
+    // Stage 2.14 — watch progress (authenticated audience only).
+    // principal.userId is the SERVER-DERIVED audience identity; no caller-
+    // supplied user/org authority participates anywhere below (D2.14 plan).
+    // -------------------------------------------------------------------
+    async getProgress(principal, query) {
+      const limit = Math.min(Math.max(query?.limit ?? 50, 1), 200);
+      return repo.listProgressByUser(principal.userId, limit);
+    },
+
+    async upsertProgress(principal, input) {
+      // Deterministic validation BEFORE any data access (never throws).
+      if (!Number.isInteger(input.positionSeconds) || input.positionSeconds < 0) {
+        return err("invalid_position", "positionSeconds must be an integer >= 0");
+      }
+      if (!UUID_RE.test(input.contentRef)) {
+        return err("content_not_found", "contentRef must be a valid uuid");
+      }
+
+      // Owner context: the audience user's own org, derived server-side.
+      const user = await repo.findAudienceUserById(principal.userId);
+      if (!user) return err("user_not_found", "audience user does not exist or is not active");
+
+      // Eligibility: progress may only reference PUBLISHED public content.
+      const content = await repo.findPublishedContentById(input.contentRef);
+      if (!content) return err("content_not_found", "no published public content for this contentRef");
+
+      const record = await repo.upsertProgress({
+        orgId: user.orgId,
+        audienceUserId: principal.userId,
+        contentRef: input.contentRef,
+        positionSeconds: input.positionSeconds,
+      });
+      return ok({ kind: "saved" as const, record });
+    },
   };
 };
