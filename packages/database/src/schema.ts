@@ -2107,3 +2107,251 @@ export const creatorProfiles = pgTable(
 
 export type CreatorProfileRow = typeof creatorProfiles.$inferSelect;
 export type NewCreatorProfileRow = typeof creatorProfiles.$inferInsert;
+
+// ===========================================================================
+// MESSAGING & LEADS (Stage 2.17, D2.17-1..D2.17-11; bounded context 14, DM
+// sections 23-24). conversations is the mutable aggregate (status machine,
+// denormalized unread counters D2.17-7, per-participant last-read receipts
+// D2.17-8); messages and lead_follow_ups are IMMUTABLE families (DM section
+// 32.8: no lifecycle once written) — INSERT+SELECT only, live 42501 proofs.
+// org_id is ALWAYS the creator profile's organization (server-derived from
+// the handle resolution — never a client field).
+// ===========================================================================
+
+/** Conversation status machine (DM section 32.7) — enforced service-side; this CHECK mirrors it. */
+export const CONVERSATION_STATUSES = ["open", "awaiting_ai", "active", "awaiting_human", "closed"] as const;
+
+export const conversations = pgTable(
+  "conversations",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    creatorProfileId: uuid("creator_profile_id")
+      .notNull()
+      .references((): AnyPgColumn => creatorProfiles.id, { onDelete: "restrict" }),
+    audienceUserId: uuid("audience_user_id")
+      .notNull()
+      .references((): AnyPgColumn => audienceUsers.id, { onDelete: "restrict" }),
+    subject: text("subject"),
+    status: text("status").notNull().default("open"),
+    /** Denormalized unread counters (D2.17-7): reset-to-zero on receipt, never decremented. */
+    audienceUnreadCount: integer("audience_unread_count").notNull().default(0),
+    creatorUnreadCount: integer("creator_unread_count").notNull().default(0),
+    /** Per-participant read receipts (D2.17-8): mutable columns on the MUTABLE aggregate — never on messages. */
+    audienceLastReadMessageId: uuid("audience_last_read_message_id").references((): AnyPgColumn => messages.id, { onDelete: "restrict" }),
+    creatorLastReadMessageId: uuid("creator_last_read_message_id").references((): AnyPgColumn => messages.id, { onDelete: "restrict" }),
+    /** One lead per conversation (service-enforced); nullable until a lead is created. */
+    leadId: uuid("lead_id"),
+    /** Human takeover record (DM section 23: assignment + audit fact, never a third participant row). */
+    assignedOperatorId: uuid("assigned_operator_id"),
+    takenOverAt: timestamp("taken_over_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("conversations_status_check", sql`${t.status} in ('open', 'awaiting_ai', 'active', 'awaiting_human', 'closed')`),
+    check("conversations_subject_length_check", sql`${t.subject} is null or char_length(${t.subject}) between 1 and 200`),
+    check("conversations_audience_unread_check", sql`${t.audienceUnreadCount} >= 0`),
+    check("conversations_creator_unread_check", sql`${t.creatorUnreadCount} >= 0`),
+    /**
+     * At most ONE non-closed conversation per audience-user + creator-profile
+     * pair (partial unique — Stage 2.16 precedent). Closed conversations are
+     * history; a viewer may start a fresh conversation afterwards.
+     */
+    uniqueIndex("conversations_open_pair_unique")
+      .on(t.audienceUserId, t.creatorProfileId)
+      .where(sql`status <> 'closed'`),
+    index("idx_conversations_org_status").on(t.orgId, t.status),
+    index("idx_conversations_creator_profile").on(t.creatorProfileId),
+    index("idx_conversations_audience_user").on(t.audienceUserId),
+  ],
+).enableRLS();
+
+export type ConversationRow = typeof conversations.$inferSelect;
+export type NewConversationRow = typeof conversations.$inferInsert;
+
+/**
+ * IMMUTABLE message family (DM section 32.8: "no lifecycle — immutable once
+ * written"). Author consistency is enforced by CHECK: exactly one author ref
+ * per kind; audience/operator send human messages (service-derived — clients
+ * can never submit ai/system), ai/system are reserved for the future
+ * Communication Engine (D2.17-2).
+ */
+export const messages = pgTable(
+  "messages",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references((): AnyPgColumn => conversations.id, { onDelete: "restrict" }),
+    authorKind: text("author_kind").notNull(),
+    authorAudienceUserId: uuid("author_audience_user_id"),
+    authorOperatorId: uuid("author_operator_id"),
+    authorAiCreatorId: uuid("author_ai_creator_id"),
+    messageType: text("message_type").notNull().default("message"),
+    body: text("body").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("messages_author_kind_check", sql`${t.authorKind} in ('ai', 'human', 'system')`),
+    check("messages_message_type_check", sql`${t.messageType} in ('message', 'service_inquiry', 'system_notice')`),
+    check("messages_body_length_check", sql`char_length(${t.body}) between 1 and 4000`),
+    check(
+      "messages_author_consistency_check",
+      sql`(
+        (author_kind = 'human' and ((author_audience_user_id is not null)::int + (author_operator_id is not null)::int = 1) and author_ai_creator_id is null)
+        or (author_kind = 'ai' and author_ai_creator_id is not null and author_audience_user_id is null and author_operator_id is null)
+        or (author_kind = 'system' and author_audience_user_id is null and author_operator_id is null and author_ai_creator_id is null)
+      )`,
+    ),
+    index("idx_messages_conversation_created").on(t.conversationId, t.createdAt),
+    index("idx_messages_org").on(t.orgId),
+  ],
+).enableRLS();
+
+export type MessageRow = typeof messages.$inferSelect;
+export type NewMessageRow = typeof messages.$inferInsert;
+
+/** Creator service offering (DM section 24) — referenced by inquiries/leads. Table name is service_offerings: public.services is occupied by a pre-existing foreign marketing/CRM application on the shared Supabase project (see DOMAIN_MODEL section 38 note). */
+export const serviceOfferings = pgTable(
+  "service_offerings",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    aiCreatorId: uuid("ai_creator_id")
+      .notNull()
+      .references((): AnyPgColumn => aiCreators.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    category: text("category"),
+    status: text("status").notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("service_offerings_status_check", sql`${t.status} in ('active', 'retired')`),
+    check("service_offerings_name_length_check", sql`char_length(${t.name}) between 1 and 200`),
+    check("service_offerings_category_length_check", sql`${t.category} is null or char_length(${t.category}) between 1 and 100`),
+    check("service_offerings_description_length_check", sql`${t.description} is null or char_length(${t.description}) <= 2000`),
+    unique("service_offerings_org_creator_name_unique").on(t.orgId, t.aiCreatorId, t.name),
+    index("idx_service_offerings_org_status").on(t.orgId, t.status),
+    index("idx_service_offerings_ai_creator").on(t.aiCreatorId),
+  ],
+).enableRLS();
+
+export type ServiceOfferingRow = typeof serviceOfferings.$inferSelect;
+export type NewServiceOfferingRow = typeof serviceOfferings.$inferInsert;
+
+/** A message classified as a business inquiry (DM section 24) — the seed of a Lead. */
+export const serviceInquiries = pgTable(
+  "service_inquiries",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references((): AnyPgColumn => conversations.id, { onDelete: "restrict" }),
+    /** The classified message — one inquiry per message, ever. */
+    messageId: uuid("message_id")
+      .notNull()
+      .references((): AnyPgColumn => messages.id, { onDelete: "restrict" }),
+    classification: text("classification").notNull(),
+    /** AI-derived confidence; always null in 2.17 (operator classification). */
+    confidence: numeric("confidence", { precision: 3, scale: 2 }),
+    requestedServiceId: uuid("requested_service_id").references((): AnyPgColumn => serviceOfferings.id, { onDelete: "restrict" }),
+    status: text("status").notNull().default("open"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("service_inquiries_status_check", sql`${t.status} in ('open', 'converted', 'dismissed')`),
+    check("service_inquiries_classification_length_check", sql`char_length(${t.classification}) between 1 and 200`),
+    check("service_inquiries_confidence_check", sql`${t.confidence} is null or (${t.confidence} >= 0 and ${t.confidence} <= 1)`),
+    unique("service_inquiries_message_unique").on(t.messageId),
+    index("idx_service_inquiries_conversation").on(t.conversationId),
+    index("idx_service_inquiries_org_status").on(t.orgId, t.status),
+  ],
+).enableRLS();
+
+export type ServiceInquiryRow = typeof serviceInquiries.$inferSelect;
+export type NewServiceInquiryRow = typeof serviceInquiries.$inferInsert;
+
+/** Lead pipeline (DM section 24, machine section 32.9) — transitions audited, never silent. */
+export const LEAD_STATUSES = ["new", "triaged", "assigned", "in_progress", "won", "lost", "archived"] as const;
+
+export const serviceLeads = pgTable(
+  "service_leads",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references((): AnyPgColumn => conversations.id, { onDelete: "restrict" }),
+    creatorProfileId: uuid("creator_profile_id")
+      .notNull()
+      .references((): AnyPgColumn => creatorProfiles.id, { onDelete: "restrict" }),
+    audienceUserId: uuid("audience_user_id")
+      .notNull()
+      .references((): AnyPgColumn => audienceUsers.id, { onDelete: "restrict" }),
+    serviceInquiryId: uuid("service_inquiry_id")
+      .notNull()
+      .references((): AnyPgColumn => serviceInquiries.id, { onDelete: "restrict" }),
+    classification: text("classification"),
+    requestedServiceId: uuid("requested_service_id").references((): AnyPgColumn => serviceOfferings.id, { onDelete: "restrict" }),
+    status: text("status").notNull().default("new"),
+    assignedOperatorId: uuid("assigned_operator_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("service_leads_status_check", sql`${t.status} in ('new', 'triaged', 'assigned', 'in_progress', 'won', 'lost', 'archived')`),
+    check("service_leads_classification_length_check", sql`${t.classification} is null or char_length(${t.classification}) between 1 and 200`),
+    index("idx_service_leads_org_status").on(t.orgId, t.status),
+    index("idx_service_leads_conversation").on(t.conversationId),
+    index("idx_service_leads_assigned_operator").on(t.assignedOperatorId),
+  ],
+).enableRLS();
+
+export type ServiceLeadRow = typeof serviceLeads.$inferSelect;
+export type NewServiceLeadRow = typeof serviceLeads.$inferInsert;
+
+/**
+ * IMMUTABLE follow-up records (DM section 24: "immutable: who, when, what").
+ * INSERT+SELECT only — lead progress lives on the lead's own status machine.
+ */
+export const leadFollowUps = pgTable(
+  "lead_follow_ups",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    leadId: uuid("lead_id")
+      .notNull()
+      .references((): AnyPgColumn => serviceLeads.id, { onDelete: "restrict" }),
+    operatorId: uuid("operator_id")
+      .notNull()
+      .references((): AnyPgColumn => operators.id, { onDelete: "restrict" }),
+    note: text("note").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("lead_follow_ups_note_length_check", sql`char_length(${t.note}) between 1 and 2000`),
+    index("idx_lead_follow_ups_lead").on(t.leadId),
+    index("idx_lead_follow_ups_org").on(t.orgId),
+  ],
+).enableRLS();
+
+export type LeadFollowUpRow = typeof leadFollowUps.$inferSelect;
+export type NewLeadFollowUpRow = typeof leadFollowUps.$inferInsert;

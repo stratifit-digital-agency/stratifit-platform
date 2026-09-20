@@ -15,6 +15,25 @@ describe("operator capability matrix", () => {
     expect(hasCapability(["viewer"], "production.plan")).toBe(false);
   });
 
+  // Stage 2.17 (D2.17-6): the frozen messaging capability mapping stands —
+  // admin + operator work the inbox and the lead pipeline; reviewer/viewer
+  // have no Messaging access (no new capabilities were created).
+  describe("messaging capability family (Stage 2.17, D2.17-6)", () => {
+    it("grants messaging.takeover to admin and operator only", () => {
+      expect(hasCapability(["admin"], "messaging.takeover")).toBe(true);
+      expect(hasCapability(["operator"], "messaging.takeover")).toBe(true);
+      expect(hasCapability(["reviewer"], "messaging.takeover")).toBe(false);
+      expect(hasCapability(["viewer"], "messaging.takeover")).toBe(false);
+    });
+
+    it("grants lead.assign to admin and operator only", () => {
+      expect(hasCapability(["admin"], "lead.assign")).toBe(true);
+      expect(hasCapability(["operator"], "lead.assign")).toBe(true);
+      expect(hasCapability(["reviewer"], "lead.assign")).toBe(false);
+      expect(hasCapability(["viewer"], "lead.assign")).toBe(false);
+    });
+  });
+
   it("unions multiple roles without duplicates", () => {
     const caps = capabilitiesFor(["reviewer", "operator"]);
     expect(new Set(caps).size).toBe(caps.length);

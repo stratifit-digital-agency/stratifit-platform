@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CapabilityRequest,
   DomainEventEnvelope,
+  DomainEventName,
   makeEnvelope,
   MessageRequest,
   ProductionManifest,
@@ -78,6 +79,21 @@ describe("event envelope", () => {
       payload: { publicationId: "pub_1" },
     });
     expect(DomainEventEnvelope.safeParse(envelope).success).toBe(true);
+  });
+
+  // Stage 2.17 (D2.17-4/D2.17-5): the three pre-justified EVENT_ARCHITECTURE
+  // extension names — taxonomy 33 → 36. Additive only; nothing else joined.
+  it("accepts the Stage 2.17 messaging events and keeps the taxonomy at 36", () => {
+    for (const name of ["conversation.taken_over", "lead.created", "lead.assigned"] as const) {
+      const envelope = makeEnvelope({
+        eventId: `evt-${name}`,
+        name,
+        correlation: { conversationId: "conv-1" },
+        payload: { conversationId: "conv-1" },
+      });
+      expect(DomainEventEnvelope.safeParse(envelope).success).toBe(true);
+    }
+    expect(DomainEventName.options).toHaveLength(36);
   });
 
   it("rejects unknown event names", () => {

@@ -66,6 +66,11 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "qc_checks",
     "qc_reviews",
     "qc_issues",
+    // Stage 2.17 (Messaging & Leads): mutable aggregates.
+    "conversations",
+    "service_offerings",
+    "service_inquiries",
+    "service_leads",
   ] as const;
 
   // Immutable families (D2.6-4 / D2.7-4 / Stage 2.8 catalog versions /
@@ -85,6 +90,9 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "distribution_references",
     "qc_review_decisions",
     "qc_results",
+    // Stage 2.17 (Messaging & Leads): immutable message + follow-up families.
+    "messages",
+    "lead_follow_ups",
   ] as const;
 
   it("grants stratifit_runtime INSERT+SELECT only on the immutable families", async () => {

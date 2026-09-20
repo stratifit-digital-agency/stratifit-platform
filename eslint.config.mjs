@@ -57,6 +57,10 @@ const elementTypes = [
   // publication-authored creator_profiles snapshot family (public-safe read
   // API composed by Media's creators surface; D2.16-8).
   { type: "public-service", pattern: "services/people/**", mode: "full" },
+  // Stage 2.17: messaging owns the conversations/messages/offerings/inquiries/
+  // leads/follow-ups family (audience-private + operator surfaces; Media
+  // composes the audience-safe fragment; D2.17-1).
+  { type: "public-service", pattern: "services/messaging/**", mode: "full" },
   { type: "control-app", pattern: "apps/stratifit-control/**", mode: "full" },
   { type: "media-app", pattern: "apps/stratifit-media/**", mode: "full" },
 ];

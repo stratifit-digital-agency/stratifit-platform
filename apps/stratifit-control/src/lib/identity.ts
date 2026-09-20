@@ -50,13 +50,18 @@ import {
   DurableStratifitMediaAdapter,
   type PublishingService,
 } from "@stratifit/publishing-engine";
-import { createAudienceService, createDrizzleAudienceRepository, slugify, type AudienceService } from "@stratifit/audience";
-import {
+import { createAudienceService, createDrizzleAudienceRepository, slugify, type AudienceService } from "@stratifit/audience";import {
   createPeopleService,
   createDrizzlePeopleRepository,
   createCreatorSubjectPort,
   type PeopleService,
 } from "@stratifit/people";
+import {
+  createMessagingService,
+  createDrizzleMessagingRepository,
+  createFixedWindowRateLimiter,
+  type MessagingService,
+} from "@stratifit/messaging";
 import { InProcessEventPublisher, idempotent } from "@stratifit/events";
 import type { DomainEventEnvelope } from "@stratifit/contracts";
 import { createDatabase } from "@stratifit/database";
@@ -96,6 +101,7 @@ let services: {
   publishing: PublishingService;
   audience: AudienceService;
   people: PeopleService;
+  messaging: MessagingService;
 } | null = null;
 
 const buildServices = () => {
@@ -644,6 +650,33 @@ const buildServices = () => {
         // the seam unwired (vacuous pass). A future Rights stage adds the
         // adapter here.
       }),
+      // Stage 2.17: the Messaging & Leads service shares the SAME Drizzle
+      // pool and the SAME audit transaction writer (D2.4-1 reused): an
+      // operator messaging/lead mutation and its audit record commit in the
+      // SAME transaction. The D2.17-9 audience send limiter is the in-process
+      // fixed-window default (a durable limiter later swaps behind the same
+      // port). Conversation/lead events emit onto the SHARED bus post-commit;
+      // no consumer is wired yet (Notifications is a future stage).
+      messaging: createMessagingService({
+        repository: createDrizzleMessagingRepository({
+          db,
+          auditWriter: {
+            appendWithin: (tx, entry) =>
+              writer.appendWithin(tx as Parameters<typeof writer.appendWithin>[0], {
+                actorId: entry.actorId,
+                action: entry.action,
+                subjectKind: entry.targetType,
+                subjectId: entry.targetId,
+                organizationId: entry.organizationId ?? null,
+                correlationId: entry.correlationId ?? null,
+                causationId: entry.causationId ?? null,
+                payload: entry.metadata ?? {},
+              }),
+          },
+        }),
+        rateLimiter: createFixedWindowRateLimiter(),
+        publisher: eventBus,
+      }),
       membership: createMembershipService({
         repository: membershipRepo,
         // D2.4-1: transaction path is primary; this fallback seam is unused
@@ -695,6 +728,9 @@ export const getPublishingService = (): PublishingService => buildServices().pub
 
 /** Exposed for the Stage 2.16 /api/control/people routes (D2.16-4). */
 export const getPeopleService = (): PeopleService => buildServices().people;
+
+/** Exposed for the Stage 2.17 /api/control/messaging routes (D2.17-6). */
+export const getMessagingService = (): MessagingService => buildServices().messaging;
 
 /** Resolve the current operator server-side; null when anonymous/unprovisioned. */
 export const resolveControlOperator = async (): Promise<ControlOperatorContext | null> => {

@@ -969,6 +969,16 @@ Internal Operator → Stratifit Control → Authorized internal APIs
 **Conceptual ONLY — this is not the final relational schema. No SQL, no migrations,
 no Drizzle changes. The final schema follows after DOMAIN_MODEL.md approval.**
 
+**Shared-database naming note (Stage 2.17):** the production Supabase project
+also hosts a pre-existing foreign marketing/CRM application schema in the same
+`public` schema. Its `leads` and `services` tables are actively used, owned by
+the `postgres` role, and are not administerable by any platform role. The
+Messaging & Leads bounded context therefore persists its offering and lead
+aggregates as `service_offerings` and `service_leads` — a table-naming deviation
+from the conceptual names above, authorized in Stage 2.17 to avoid
+cross-application collisions. Domain semantics are unchanged. The foreign
+schema remains entirely outside the platform grant/RLS surface.
+
 - **Entities likely persisted** (one table each, typically): organizations, teams,
   memberships, operators, audience_users, verification_requirements, projects,
   productions, production_templates, production_plan_versions,

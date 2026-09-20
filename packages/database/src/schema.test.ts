@@ -82,7 +82,9 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         k !== "QC_OUTCOMES" &&
         k !== "QC_EVALUATED_BY" &&
         k !== "QC_SEVERITIES" &&
-        k !== "QC_ISSUE_RESOLUTIONS",
+        k !== "QC_ISSUE_RESOLUTIONS" &&
+        k !== "CONVERSATION_STATUSES" &&
+        k !== "LEAD_STATUSES",
     );
     expect(exported.sort()).toEqual(
       [
@@ -133,6 +135,15 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         "creatorProfiles",
         "workflowVersions",
         "workflows",
+        // Stage 2.17 (Messaging & Leads): service_offerings/service_leads —
+        // the services/leads names are occupied by a foreign marketing/CRM
+        // schema on the shared Supabase project (authorized deviation).
+        "conversations",
+        "messages",
+        "serviceOfferings",
+        "serviceInquiries",
+        "serviceLeads",
+        "leadFollowUps",
       ].sort(),
     );
   });
@@ -372,6 +383,20 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   personas: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   ai_creators: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   creator_profiles: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  // Stage 2.17 (Messaging & Leads Foundation): the mutable conversation
+  // aggregate (state machine + denormalized unread counters + per-participant
+  // read receipts, D2.17-7/D2.17-8) plus the mutable offering/inquiry/lead
+  // family; messages and lead_follow_ups are IMMUTABLE families (DM section
+  // 32.8 — INSERT + SELECT only, live 42501 proofs). NAMING NOTE: the offering
+  // and lead tables are service_offerings/service_leads — public.services and
+  // public.leads are occupied by a pre-existing foreign marketing/CRM schema
+  // on the shared Supabase project (see DOMAIN_MODEL section 38).
+  conversations: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  messages: ["INSERT", "SELECT"],
+  service_offerings: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  service_inquiries: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  service_leads: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  lead_follow_ups: ["INSERT", "SELECT"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -521,8 +546,12 @@ describe("domain-table guard (per approved plan)", () => {
       // 2.12 (Publishing Foundation) — it is no longer forbidden.
       // "aiCreators" graduated in Stage 2.16 (People: AI Creator & Public
       // Profile Foundation, D2.16-1 chain-only five-table scope).
-      "conversations",
-      "messages",
+      // "conversations"/"messages" graduated in Stage 2.17 (Messaging &
+      // Leads Foundation) — the Stage 2.17 tables use service_offerings and
+      // service_leads because public.services/public.leads are occupied by a
+      // pre-existing foreign marketing/CRM application on the shared
+      // Supabase project (authorized naming deviation).
+
       "auditLogs",
       "jobLeases",
       "workerLeases",

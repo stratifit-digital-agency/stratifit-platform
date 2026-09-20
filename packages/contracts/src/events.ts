@@ -54,6 +54,13 @@ export const DomainEventName = z.enum([
   "conversation.created",
   "message.created",
   "message.read",
+  // messaging (Stage 2.17, D2.17-4/D2.17-5: the three pre-justified
+  // EVENT_ARCHITECTURE §8 extension names join additively — the takeover fact
+  // and the lead lifecycle facts. No notification.* events exist; delivery
+  // emits no domain events by design.)
+  "conversation.taken_over",
+  "lead.created",
+  "lead.assigned",
   // identity & tenancy (Stage 2.2, approved D-5; producer: services/identity)
   "membership.granted",
   "membership.revoked",

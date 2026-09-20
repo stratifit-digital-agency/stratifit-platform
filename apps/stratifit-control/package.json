@@ -23,6 +23,7 @@
     "@stratifit/events": "workspace:*",
     "@stratifit/generation": "workspace:*",
     "@stratifit/identity": "workspace:*",
+    "@stratifit/messaging": "workspace:*",
     "@stratifit/people": "workspace:*",
     "@stratifit/permissions": "workspace:*",
     "@stratifit/production-engine": "workspace:*",
