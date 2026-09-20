@@ -11,6 +11,13 @@ export interface FixedWindowRateLimiterOptions {
   readonly windowMs?: number;
   /** Max consumes per window (frozen default: 10 sends). */
   readonly limit?: number;
+  /**
+   * Generic per-key overrides for compositions that split the budget across
+   * multiple key families (Stage 2.19 beacon: ip=30 / session=60 per 60s).
+   * Fall back to `limit` for any key family left unset; messaging's own
+   * D2.17-9 usage is unchanged.
+   */
+  readonly keyLimits?: Readonly<Record<string, number>>;
   /** Injectable clock (tests). */
   readonly now?: () => number;
 }
@@ -28,6 +35,11 @@ interface WindowState {
 export const createFixedWindowRateLimiter = (options: FixedWindowRateLimiterOptions = {}): RateLimiter => {
   const windowMs = options.windowMs ?? 60_000;
   const limit = options.limit ?? 10;
+  const keyLimits = options.keyLimits ?? {};
+  const limitForKey = (key: string): number => {
+    const family = key.split(":")[0] ?? "";
+    return keyLimits[family] ?? limit;
+  };
   const now = options.now ?? (() => Date.now());
   const windows = new Map<string, WindowState>();
 
@@ -39,7 +51,7 @@ export const createFixedWindowRateLimiter = (options: FixedWindowRateLimiterOpti
         windows.set(key, { windowStart: t, count: 1 });
         return true;
       }
-      if (current.count >= limit) return false;
+      if (current.count >= limitForKey(key)) return false;
       current.count += 1;
       return true;
     },

@@ -1719,6 +1719,54 @@ export type NotificationRow = typeof notifications.$inferSelect;
 export type NewNotificationRow = typeof notifications.$inferInsert;
 
 /**
+ * Stage 2.19 - ANALYTICS INTAKE (frozen D2.19-SELECT, D2.19-A1..A6).
+ *
+ * The platform's FIRST PUBLIC UNAUTHENTICATED WRITE SURFACE (beacon).
+ * IMMUTABLE family (INSERT+SELECT only, live 42501 proofs): rows are
+ * append-only accepted events; there is no update/delete/read path anywhere
+ * (D2.19-A6: no read model in this stage). `ingest_event_id` is the
+ * idempotency key and EQUALS the emitted `analytics.received` envelope
+ * eventId (D2.19-A2 relationship) - replay is deduped at the UNIQUE and
+ * never re-emits. `org_id`/`audience_user_id` are SERVER-RESOLVED only;
+ * client authority fields are structurally rejected at the beacon. Raw
+ * session ids and IPs are never persisted - only the SHA-256 session hash.
+ * Retention (180 days) is DOCUMENTED-ONLY (D2.19-P7): no worker/deletion.
+ */
+export const analyticsEvents = pgTable(
+  "analytics_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    eventType: text("event_type").notNull(),
+    contentRef: uuid("content_ref").references((): AnyPgColumn => publicContent.id, { onDelete: "restrict" }),
+    /** Server-resolved from the content row / audience user; never client-supplied. */
+    orgId: uuid("org_id").references(() => organizations.id, { onDelete: "restrict" }),
+    /** Server-derived audience principal; never a request-body field. */
+    audienceUserId: uuid("audience_user_id").references((): AnyPgColumn => audienceUsers.id, { onDelete: "restrict" }),
+    /** SHA-256 hex of the client session id (64 chars); raw id never stored. */
+    sessionHash: text("session_hash").notNull(),
+    /** Flat allowlist properties (validated at intake; no nested/arrays). */
+    properties: jsonb("properties"),
+    clientTs: timestamp("client_ts", { withTimezone: true }),
+    /** Ingestion provenance. */
+    serverTs: timestamp("server_ts", { withTimezone: true }).notNull().defaultNow(),
+    /** Idempotency key === analytics.received envelope eventId (D2.19-A2). */
+    ingestEventId: text("ingest_event_id").notNull().unique(),
+  },
+  (t) => [
+    check(
+      "analytics_events_event_type_check",
+      sql`${t.eventType} in ('content_view', 'content_progress', 'content_complete', 'content_share')`,
+    ),
+    check("analytics_events_session_hash_check", sql`char_length(${t.sessionHash}) = 64`),
+    index("idx_analytics_content_ts").on(t.contentRef, t.serverTs.desc()),
+    index("idx_analytics_type_ts").on(t.eventType, t.serverTs.desc()),
+  ],
+).enableRLS();
+
+export type AnalyticsEventRow = typeof analyticsEvents.$inferSelect;
+export type NewAnalyticsEventRow = typeof analyticsEvents.$inferInsert;
+
+/**
  * Social Graph — context 13 (Stage 2.15, D2.15-1..6).
  *
  * LIKE — owner-scoped audience-platform state over PUBLISHED public content.

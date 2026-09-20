@@ -249,6 +249,16 @@ Public-safe + audience-private surface, rooted at `/api/media/*`:
 > the own-state family below lists the same capabilities under the
 > representative `/api/media/me/...` shape (see §13 of the implementation plan
 > for the Stage 2.17-era route-shape precedent).
+>
+> **Stage 2.19 route note:** the analytics intake beacon (D2.19-A1, the
+> platform's first intentional public unauthenticated write surface) is
+> implemented at `POST /api/events/beacon`: strict-Zod envelope (eventType in
+> the frozen four-kind family, optional contentRef, hashed session id, flat
+> allowlisted properties, optional clientTs/eventId), 16KB pre-parse body cap,
+> dual-key (source IP + hashed session) in-process fixed-window rate limit →
+> 429 retryable, published-only server-side content/org resolution, whitelisted
+> 202 `{ accepted, eventId, deduped }` outcome (§13 error envelope on 400/413/429).
+> The route shape follows the Stage 2.17/2.18 `/api/...` precedent above.
 
 | Family | Routes (representative) | Command/Query | Auth state | Backed by |
 |---|---|---|---|---|

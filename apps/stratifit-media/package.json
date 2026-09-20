@@ -12,9 +12,11 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@stratifit/analytics": "workspace:*",
     "@stratifit/audience": "workspace:*",
     "@stratifit/auth": "workspace:*",
     "@stratifit/contracts": "workspace:*",
+    "@stratifit/events": "workspace:*",
     "@stratifit/identity": "workspace:*",
     "@stratifit/messaging": "workspace:*",
     "@stratifit/people": "workspace:*",

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { getTableColumns } from "drizzle-orm";
 import * as schemaExports from "./schema";
 import {
+  analyticsEvents,
   notifications,
   assetLineage,
   assetVersions,
@@ -147,6 +148,8 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         "leadFollowUps",
         // Stage 2.18 (in-app Notifications): the single audience-private feed.
         "notifications",
+        // Stage 2.19 (Analytics Intake): the immutable public-beacon family.
+        "analyticsEvents",
       ].sort(),
     );
   });
@@ -404,6 +407,9 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   // full arwd, role-scoped runtime_all; owner scoping is service-enforced on
   // the server-derived audienceUserId (watch_progress precedent, D2.18 freeze).
   notifications: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  // Stage 2.19 (Analytics Intake): the FIRST PUBLIC UNAUTHENTICATED WRITE
+  // surface — immutable INSERT+SELECT family (live 42501 proofs; D2.19-A1/A6).
+  analytics_events: ["INSERT", "SELECT"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -1053,6 +1059,48 @@ describe("watch_progress (Stage 2.14 audience platform state)", () => {
       "CREATE POLICY runtime_all ON public.watch_progress FOR ALL TO stratifit_runtime USING (true) WITH CHECK (true)",
       "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.watch_progress TO stratifit_runtime",
     ]) {
+      expect(ddl).toContain(fragment);
+    }
+    expect(ddl).not.toMatch(/TO PUBLIC/);
+  });
+});
+
+describe("analytics_events (Stage 2.19 analytics intake, D2.19-A1..A6)", () => {
+  it("frozen shape: immutable intake family, ingest_event_id idempotency, session hash, FK RESTRICT, RLS, INSERT+SELECT", () => {
+    const cols = getTableColumns(analyticsEvents);
+    expect(Object.keys(cols).sort()).toEqual(
+      ["audienceUserId", "clientTs", "contentRef", "eventType", "id", "ingestEventId", "orgId", "properties", "serverTs", "sessionHash"],
+    );
+    expect(cols.eventType.notNull).toBe(true);
+    expect(cols.sessionHash.notNull).toBe(true);
+    expect(cols.ingestEventId.notNull).toBe(true);
+    expect(cols.serverTs.notNull).toBe(true);
+    expect(cols.properties.notNull).toBe(false);
+    expect(cols.clientTs.notNull).toBe(false);
+    expect(cols.contentRef.notNull).toBe(false);
+    expect(cols.orgId.notNull).toBe(false);
+    expect(cols.audienceUserId.notNull).toBe(false);
+    const ddl = readdirSync(fileURLToPath(new URL("../drizzle/", import.meta.url)))
+      .filter((f) => f.startsWith("0039_") || f.startsWith("0040_"))
+      .map((f) => readFileSync(fileURLToPath(new URL(`../drizzle/${f}`, import.meta.url)), "utf8"))
+      .join("\n");
+    const fragments = [
+      'CONSTRAINT "analytics_events_ingest_event_id_unique" UNIQUE("ingest_event_id")',
+      "in ('content_view', 'content_progress', 'content_complete', 'content_share')",
+      'char_length("analytics_events"."session_hash") = 64',
+      'REFERENCES "public"."public_content"("id") ON DELETE restrict',
+      'REFERENCES "public"."organizations"("id") ON DELETE restrict',
+      'REFERENCES "public"."audience_users"("id") ON DELETE restrict',
+      "ENABLE ROW LEVEL SECURITY",
+      // 0040 multi-line house form: immutable INSERT+SELECT only.
+      "GRANT SELECT, INSERT ON TABLE public.analytics_events TO stratifit_runtime",
+      'CREATE POLICY "runtime_all" ON public.analytics_events',
+      "AS PERMISSIVE FOR ALL",
+      "TO stratifit_runtime",
+      "USING (true)",
+      "WITH CHECK (true)",
+    ];
+    for (const fragment of fragments) {
       expect(ddl).toContain(fragment);
     }
     expect(ddl).not.toMatch(/TO PUBLIC/);

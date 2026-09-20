@@ -144,6 +144,9 @@ importers:
 
   apps/stratifit-media:
     dependencies:
+      '@stratifit/analytics':
+        specifier: workspace:*
+        version: link:../../services/analytics
       '@stratifit/audience':
         specifier: workspace:*
         version: link:../../services/audience
@@ -153,6 +156,9 @@ importers:
       '@stratifit/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@stratifit/events':
+        specifier: workspace:*
+        version: link:../../packages/events
       '@stratifit/identity':
         specifier: workspace:*
         version: link:../../services/identity
@@ -347,6 +353,31 @@ importers:
         specifier: ^0.44.7
         version: 0.44.7(postgres@3.4.9)
     devDependencies:
+      postgres:
+        specifier: ^3.4.7
+        version: 3.4.9
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@24.13.4)(jiti@2.7.0)(lightningcss@1.32.0)(supports-color@7.2.0)(tsx@4.23.13)
+
+  services/analytics:
+    dependencies:
+      '@stratifit/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@stratifit/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@stratifit/events':
+        specifier: workspace:*
+        version: link:../../packages/events
+      drizzle-orm:
+        specifier: ^0.44.7
+        version: 0.44.7(postgres@3.4.9)
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.4
       postgres:
         specifier: ^3.4.7
         version: 3.4.9

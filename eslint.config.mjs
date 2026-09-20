@@ -61,6 +61,9 @@ const elementTypes = [
   // leads/follow-ups family (audience-private + operator surfaces; Media
   // composes the audience-safe fragment; D2.17-1).
   { type: "public-service", pattern: "services/messaging/**", mode: "full" },
+  // Stage 2.19: analytics owns the immutable intake family (public beacon
+  // write path; Media composes the audience-facing beacon endpoint; D2.19).
+  { type: "public-service", pattern: "services/analytics/**", mode: "full" },
   { type: "control-app", pattern: "apps/stratifit-control/**", mode: "full" },
   { type: "media-app", pattern: "apps/stratifit-media/**", mode: "full" },
 ];

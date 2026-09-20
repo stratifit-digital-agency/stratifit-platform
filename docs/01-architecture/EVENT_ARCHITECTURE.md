@@ -257,6 +257,25 @@ in DOMAIN_MODEL §32 or a DATA_FLOW chain — additions require approval):
 justified additions). Every name is traceable to authoritative architecture. No
 arbitrary events were invented.
 
+> **Stage 2.19 implementation reconciliation (D2.19-A2):** the IMPLEMENTED
+> event taxonomy is exactly **36 names** (guarded by
+> `packages/contracts/src/contracts.test.ts`), not the 48-name documented
+> catalog above. The 48-name catalog is the long-term DOCUMENTED set;
+> implemented names join only via approved, additive stage decisions.
+> With Stage 2.19, `analytics.received` — declared since the original 21-name
+> contract set — is now IMPLEMENTED and PRODUCED (analytics intake boundary;
+> commit-before-event order; envelope.eventId === the persisted row's
+> ingest_event_id). It currently has **zero consumers** by design (D2.19-A6:
+> no read model in this stage; no fake consumer was introduced).
+>
+> **Stage 2.19 retention assumption (D2.19-A4, documentation-only):** the
+> `analytics_events` intake family is assumed to carry a **180-day retention
+> window** for future enforcement. NO retention worker, cleanup job, storage
+> policy, or enforcement mechanism exists in Stage 2.19 — the assumption is
+> recorded here so a later stage can implement enforcement without a new
+> semantic decision. Domain event log retention (the "Event retention"
+> section) is a separate concern and is unchanged by this note.
+
 **Deliberate non-additions (documented reuse rules):**
 
 - **Localization reuses generation/asset/publication events with variant data.** A

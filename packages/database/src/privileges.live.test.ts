@@ -95,6 +95,8 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     // Stage 2.17 (Messaging & Leads): immutable message + follow-up families.
     "messages",
     "lead_follow_ups",
+    // Stage 2.19 (Analytics Intake): immutable public-beacon family.
+    "analytics_events",
   ] as const;
 
   it("grants stratifit_runtime INSERT+SELECT only on the immutable families", async () => {
