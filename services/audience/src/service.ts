@@ -24,13 +24,23 @@ import type {
   AudienceRepository,
   AudienceService,
   AudienceServiceDeps,
+  MarkNotificationsReadInput,
+  NotificationResolution,
   ProjectionOutcome,
   PublicContentRecord,
   PublicContentType,
   PublicationPublishedEvent,
   PublicationUnpublishedEvent,
+  RecordNotificationOutcome,
 } from "./types";
-import { AUDIENCE_AUDIT_ACTIONS, CONTENT_TYPE_MAPPING, SYSTEM_ACTOR_ID, err, ok } from "./types";
+import {
+  AUDIENCE_AUDIT_ACTIONS,
+  CONTENT_TYPE_MAPPING,
+  NOTIFICATION_RECORDED_AUDIT,
+  SYSTEM_ACTOR_ID,
+  err,
+  ok,
+} from "./types";
 
 // ---------------------------------------------------------------------------
 // Slug strategy (D2.13-2): deterministic, URL-safe, globally unique.
@@ -271,6 +281,65 @@ export const createAudienceService = (deps: AudienceServiceDeps): AudienceServic
         positionSeconds: input.positionSeconds,
       });
       return ok({ kind: "saved" as const, record });
+    },
+
+    // -------------------------------------------------------------------
+    // Stage 2.18 - notifications (D2.18-SELECT, D2.18-N1..N5).
+    // -------------------------------------------------------------------
+    async recordNotification(resolution) {
+      // The composition root resolves the recipient server-side (D2.18-N1);
+      // this method only handles the already-resolved outcome shapes.
+      if (resolution.kind === "suppress_self_send") {
+        return ok<RecordNotificationOutcome>({ kind: "noop_duplicate" });
+      }
+      if (resolution.kind === "noop_missing") {
+        return err("content_not_found", "message/conversation source rows missing");
+      }
+      if (resolution.kind === "invalid_event") {
+        return err("invalid_event", resolution.message);
+      }
+      const n = resolution.notification;
+      if (!UUID_RE.test(n.audienceUserId) || !UUID_RE.test(n.orgId)) {
+        return err("invalid_event", "notification recipient/org ids must be uuids");
+      }
+      if (n.eventId.length === 0) {
+        return err("invalid_event", "notification eventId must be non-empty");
+      }
+      const recorded = await repo.runInTransaction(async (tx) => {
+        // Idempotent by UNIQUE(event_id): replay/duplicate inserts NOTHING,
+        // so replay can never create a duplicate row OR a duplicate audit
+        // record (audit is written only on the non-conflict insert path).
+        const inserted = await tx.insertNotificationIfAbsent(n);
+        if (!inserted) return null;
+        await tx.appendAudit({
+          actorId: SYSTEM_ACTOR_ID,
+          action: NOTIFICATION_RECORDED_AUDIT,
+          subjectKind: "notification",
+          subjectId: inserted.id,
+          organizationId: n.orgId,
+          causationId: n.eventId,
+          payload: { kind: n.kind, sourceKind: n.sourceKind },
+        });
+        return inserted;
+      });
+      if (!recorded) return ok<RecordNotificationOutcome>({ kind: "noop_duplicate" });
+      return ok<RecordNotificationOutcome>({ kind: "recorded", notificationId: recorded.id });
+    },
+
+    async listNotifications(principal, query) {
+      const limit = Math.min(Math.max(query?.limit ?? 50, 1), 200);
+      return repo.listNotificationsByUser(principal.userId, limit);
+    },
+
+    async unreadNotifications(principal) {
+      // D2.18-N5: derived - COUNT(read_at IS NULL) for the owner only.
+      return repo.countUnreadByUser(principal.userId);
+    },
+
+    async markNotificationsRead(principal, input: MarkNotificationsReadInput) {
+      const updated = await repo.markNotificationsRead(principal.userId, input);
+      const unreadCount = await repo.countUnreadByUser(principal.userId);
+      return ok({ updated, unreadCount });
     },
   };
 };

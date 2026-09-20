@@ -1673,6 +1673,52 @@ export type WatchProgressRow = typeof watchProgress.$inferSelect;
 export type NewWatchProgressRow = typeof watchProgress.$inferInsert;
 
 /**
+ * Stage 2.18 — in-app NOTIFICATIONS (frozen D2.18-SELECT, D2.18-N1..N5).
+ *
+ * Audience-PRIVATE owner aggregate: one durable feed per audience user.
+ * INVARIANT: rows are created ONLY by the `message.created` consumer (the
+ * composition-root handler resolves the recipient from committed conversation
+ * state, D2.18-N1 — the event payload stays frozen). `event_id` is the
+ * durable idempotency key (envelope eventId); replay/duplicate delivery
+ * cannot create a second row. Unread state is DERIVED (`read_at IS NULL`,
+ * D2.18-N5) — never a denormalized counter. Kinds: `conversation_reply` only
+ * (social kinds deferred per D2.18-N2 / D2.15-3; no notification.* events,
+ * taxonomy stays at 36 per D2.18-N3).
+ */
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    /** Owner. Every access path is keyed by this server-derived identity. */
+    audienceUserId: uuid("audience_user_id")
+      .notNull()
+      .references((): AnyPgColumn => audienceUsers.id, { onDelete: "restrict" }),
+    kind: text("kind").notNull(),
+    sourceKind: text("source_kind"),
+    /** Owner-scoped opaque addressing reference (D2.13-4 FK precedent). */
+    sourceRef: uuid("source_ref"),
+    /** Durable idempotency key = envelope eventId (D2.18-P1). */
+    eventId: text("event_id").notNull().unique(),
+    title: text("title").notNull(),
+    body: text("body"),
+    readAt: timestamp("read_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("notifications_kind_check", sql`${t.kind} in ('conversation_reply')`),
+    check("notifications_source_kind_check", sql`${t.sourceKind} is null or ${t.sourceKind} in ('conversation')`),
+    /** Derived unread (D2.18-N5): index (owner, newest-first) serves feed + unread scan. */
+    index("idx_notifications_owner_created").on(t.audienceUserId, t.createdAt.desc()),
+  ],
+).enableRLS();
+
+export type NotificationRow = typeof notifications.$inferSelect;
+export type NewNotificationRow = typeof notifications.$inferInsert;
+
+/**
  * Social Graph — context 13 (Stage 2.15, D2.15-1..6).
  *
  * LIKE — owner-scoped audience-platform state over PUBLISHED public content.

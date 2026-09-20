@@ -201,7 +201,95 @@ const buildServices = () => {
         console.error("[people] consumer failed:", envelope.name, e);
       }
     });
-    const eventBus = new InProcessEventPublisher([audienceHandler, peopleHandler]);
+    // Stage 2.18 (D2.18-SELECT/N1..N5): in-app NOTIFICATION projection on the
+    // SAME bus. The handler consumes ONLY `message.created` (the payload
+    // contract stays frozen) and resolves the recipient SERVER-SIDE from the
+    // committed message + conversation rows (D2.18-N1 - the event payload
+    // carries no recipient). Self-sends are suppressed; malformed/missing
+    // source data never throws (typed outcomes); the audience service's
+    // recordNotification is idempotent by envelope eventId (D2.18-P1) and
+    // runs in its OWN transaction, so a consumer failure can never roll back
+    // the already-committed message.
+    const notificationsHandler = idempotent(async (envelope: DomainEventEnvelope) => {
+      if (envelope.name !== "message.created") return;
+      try {
+        const payload = envelope.payload as Record<string, unknown>;
+        const conversationId = payload.conversationId;
+        const messageId = payload.messageId;
+        if (typeof conversationId !== "string" || typeof messageId !== "string") {
+          await services!.audience.recordNotification({
+            kind: "invalid_event",
+            message: "message.created payload missing conversationId/messageId",
+          });
+          return;
+        }
+        // D2.18-N1: recipient resolution reads COMMITTED state server-side.
+        const { messages, conversations } = await import("@stratifit/database");
+        const [message] = await db
+          .select({
+            id: messages.id,
+            orgId: messages.orgId,
+            conversationId: messages.conversationId,
+            authorAudienceUserId: messages.authorAudienceUserId,
+            body: messages.body,
+          })
+          .from(messages)
+          .where(eq(messages.id, messageId))
+          .limit(1);
+        if (!message) {
+          await services!.audience.recordNotification({ kind: "noop_missing" });
+          return;
+        }
+        const [conversation] = await db
+          .select({
+            id: conversations.id,
+            orgId: conversations.orgId,
+            audienceUserId: conversations.audienceUserId,
+          })
+          .from(conversations)
+          .where(eq(conversations.id, conversationId))
+          .limit(1);
+        if (!conversation) {
+          await services!.audience.recordNotification({ kind: "noop_missing" });
+          return;
+        }
+        // Source consistency: the committed message must belong to the
+        // committed conversation (fail closed on any mismatch).
+        if (message.conversationId !== conversation.id || message.orgId !== conversation.orgId) {
+          await services!.audience.recordNotification({
+            kind: "invalid_event",
+            message: "message/conversation source mismatch",
+          });
+          return;
+        }
+        // Self-send suppression: the audience author never notifies itself.
+        if (message.authorAudienceUserId === conversation.audienceUserId) {
+          await services!.audience.recordNotification({ kind: "suppress_self_send" });
+          return;
+        }
+        const result = await services!.audience.recordNotification({
+          kind: "notify",
+          notification: {
+            orgId: conversation.orgId,
+            audienceUserId: conversation.audienceUserId,
+            kind: "conversation_reply",
+            sourceKind: "conversation",
+            sourceRef: conversation.id,
+            eventId: envelope.eventId,
+            title: "New reply",
+            // Audience-appropriate preview of the recipient's OWN conversation
+            // content - never operator identity, lead/assignment, or internal data.
+            body: message.body.slice(0, 200),
+          },
+        });
+        if (!result.ok) {
+          console.error("[notifications] record failed:", result.error.reason, result.error.message);
+        }
+      } catch (e) {
+        console.error("[notifications] consumer failed:", envelope.name, e);
+      }
+    });
+    const eventBus = new InProcessEventPublisher([audienceHandler, peopleHandler, notificationsHandler]);
     // Stage 2.9: narrow Catalog resolution ports over the SAME pool — the
     // generation service reads (never writes) the Stage 2.8 catalog families
     // through these structural seams (SVC sanctioned import: generation ──► ai,

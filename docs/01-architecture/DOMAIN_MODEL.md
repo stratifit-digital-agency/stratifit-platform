@@ -557,7 +557,14 @@ universe**.
   at; powers "continue watching"; not required for anonymous viewers.
 - **Notifications** — internal ID, recipient, kind (comment-reply, follow, message,
   publication-of-followed-creator, system), payload, read-at. A failed notification
-  never rolls back a successful message (invariant 6).
+  never rolls back a successful message (invariant 6). **Stage 2.18 implemented the
+  in-app foundation** (D2.18-SELECT/N1..N5): one audience-private `notifications`
+  owner aggregate with kind `conversation_reply` only, written ONLY by the
+  `message.created` consumer (recipient resolved server-side from committed
+  conversation state), idempotent by `event_id`, unread DERIVED from `read_at IS
+  NULL` (no counter column), owner mark-read unaudited. Social-derived kinds stay
+  deferred behind D2.15-3 (no `social.*` events); notification preferences and all
+  external delivery channels (email/push/SMS/WhatsApp) remain deferred.
 - **Likes / Comments / Shares / Saves** — see Social Graph.
 
 ## 22. Social Graph

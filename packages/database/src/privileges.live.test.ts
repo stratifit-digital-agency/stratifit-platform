@@ -71,6 +71,8 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "service_offerings",
     "service_inquiries",
     "service_leads",
+    // Stage 2.18 (in-app Notifications): mutable audience-owner aggregate.
+    "notifications",
   ] as const;
 
   // Immutable families (D2.6-4 / D2.7-4 / Stage 2.8 catalog versions /

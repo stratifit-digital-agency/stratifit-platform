@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { getTableColumns } from "drizzle-orm";
 import * as schemaExports from "./schema";
 import {
+  notifications,
   assetLineage,
   assetVersions,
   assets,
@@ -144,6 +145,8 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         "serviceInquiries",
         "serviceLeads",
         "leadFollowUps",
+        // Stage 2.18 (in-app Notifications): the single audience-private feed.
+        "notifications",
       ].sort(),
     );
   });
@@ -397,6 +400,10 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   service_inquiries: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   service_leads: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   lead_follow_ups: ["INSERT", "SELECT"],
+  // Stage 2.18 (in-app Notifications): mutable audience-OWNER aggregate —
+  // full arwd, role-scoped runtime_all; owner scoping is service-enforced on
+  // the server-derived audienceUserId (watch_progress precedent, D2.18 freeze).
+  notifications: ["DELETE", "INSERT", "SELECT", "UPDATE"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -1049,6 +1056,48 @@ describe("watch_progress (Stage 2.14 audience platform state)", () => {
       expect(ddl).toContain(fragment);
     }
     expect(ddl).not.toMatch(/TO PUBLIC/);
+  });
+});
+
+describe("notifications (Stage 2.18 in-app notifications, D2.18-N1..N5)", () => {
+  it("frozen shape: owner-scoped feed, event_id idempotency key, derived unread, FK RESTRICT, RLS, ARWD", () => {
+    const cols = getTableColumns(notifications);
+    expect(Object.keys(cols).sort()).toEqual(
+      ["audienceUserId", "body", "createdAt", "eventId", "id", "kind", "orgId", "readAt", "sourceKind", "sourceRef", "title"],
+    );
+    expect(cols.orgId.notNull).toBe(true);
+    expect(cols.audienceUserId.notNull).toBe(true);
+    expect(cols.eventId.notNull).toBe(true);
+    expect(cols.title.notNull).toBe(true);
+    expect(cols.kind.notNull).toBe(true);
+    expect(cols.readAt.notNull).toBe(false);
+    expect(cols.body.notNull).toBe(false);
+    expect(cols.sourceKind.notNull).toBe(false);
+    expect(cols.sourceRef.notNull).toBe(false);
+    const ddl = readdirSync(fileURLToPath(new URL("../drizzle/", import.meta.url)))
+      .filter((f) => f.startsWith("0037_") || f.startsWith("0038_"))
+      .map((f) => readFileSync(fileURLToPath(new URL(`../drizzle/${f}`, import.meta.url)), "utf8"))
+      .join("\n");
+    const fragments = [
+      'CONSTRAINT "notifications_event_id_unique" UNIQUE("event_id")',
+      'REFERENCES "public"."organizations"("id") ON DELETE restrict',
+      'REFERENCES "public"."audience_users"("id") ON DELETE restrict',
+      "ENABLE ROW LEVEL SECURITY",
+      // 0038 multi-line house form (as in 0036): quoted policy, PERMISSIVE ALL.
+      'CREATE POLICY "runtime_all" ON public.notifications',
+      "AS PERMISSIVE FOR ALL",
+      "TO stratifit_runtime",
+      "USING (true)",
+      "WITH CHECK (true)",
+      "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.notifications TO stratifit_runtime",
+      '("audience_user_id","created_at" DESC',
+    ];
+    for (const fragment of fragments) {
+      expect(ddl).toContain(fragment);
+    }
+    expect(ddl).not.toMatch(/TO PUBLIC/);
+    // D2.18-N5: no denormalized unread counter columns.
+    expect("unreadCount" in cols).toBe(false);
   });
 });
 

@@ -14,7 +14,10 @@ import { createAudienceService, slugify } from "./service";
 import type {
   AudienceRepository,
   AudienceTransaction,
+  MarkNotificationsReadInput,
+  NewNotificationInput,
   NewPublicContentInput,
+  NotificationRecord,
   PublicContentRecord,
 } from "./types";
 import { UniqueViolationSignal } from "./repository";
@@ -29,6 +32,7 @@ class FakeStore {
   rows: PublicContentRecord[] = [];
   progress: Array<{ audienceUserId: string; contentRef: string; positionSeconds: number; updatedAt: string }> = [];
   users: Array<{ id: string; orgId: string; status: string }> = [];
+  notifications: NotificationRecord[] = [];
   private seq = 0;
 
   nextId(): string {
@@ -98,6 +102,24 @@ const makeRepo = (store: FakeStore, audit: { entries: Array<{ action: string; su
     appendAudit: async (entry: { action: string; subjectId: string }) => {
       audit.entries.push({ action: entry.action, subjectId: entry.subjectId });
     },
+    insertNotificationIfAbsent: async (input: NewNotificationInput) => {
+      if (store.notifications.some((n) => n.eventId === input.eventId)) return null;
+      const row: NotificationRecord = {
+        id: store.nextId(),
+        orgId: input.orgId,
+        audienceUserId: input.audienceUserId,
+        kind: input.kind,
+        sourceKind: input.sourceKind,
+        sourceRef: input.sourceRef,
+        eventId: input.eventId,
+        title: input.title,
+        body: input.body,
+        readAt: null,
+        createdAt: new Date(),
+      };
+      store.notifications.push(row);
+      return { ...row };
+    },
   };
   const tx: AudienceTransaction = mutations;
   const repo: AudienceRepository = {
@@ -138,6 +160,29 @@ const makeRepo = (store: FakeStore, audit: { entries: Array<{ action: string; su
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         .slice(0, limit)
         .map((pr) => ({ ...pr })),
+    // Stage 2.18 fake: owner-scoped notification reads/mutations mirroring
+    // the real adapter semantics (insert lives on the shared mutations so
+    // the transaction fake exposes it too).
+    listNotificationsByUser: async (audienceUserId: string, limit: number) =>
+      store.notifications
+        .filter((n) => n.audienceUserId === audienceUserId)
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+        .slice(0, limit)
+        .map((n) => ({ ...n })),
+    countUnreadByUser: async (audienceUserId: string) =>
+      store.notifications.filter((n) => n.audienceUserId === audienceUserId && n.readAt === null).length,
+    markNotificationsRead: async (audienceUserId: string, input: MarkNotificationsReadInput) => {
+      const now = new Date();
+      const wanted = "all" in input ? null : new Set<string>(input.ids);
+      let count = 0;
+      for (const n of store.notifications) {
+        if (n.audienceUserId !== audienceUserId || n.readAt !== null) continue;
+        if (wanted !== null && !wanted.has(n.id)) continue;
+        (n as { readAt: Date | null }).readAt = now;
+        count += 1;
+      }
+      return count;
+    },
   };
   return repo;
 };
@@ -524,6 +569,155 @@ describe("watch progress (Stage 2.14, owner-scoped audience state)", () => {
       { userId: USER_A },
       { contentRef: "44444444-4444-4444-8444-444444444444", positionSeconds: 42 },
     );
+    expect(audit.entries).toHaveLength(before);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Stage 2.18 - NOTIFICATIONS (D2.18-SELECT, D2.18-N1..N5, D2.18-P1..P3)
+// ---------------------------------------------------------------------------
+
+describe("notifications (Stage 2.18)", () => {
+  const OWNER = "11111111-1111-4111-8111-111111111111";
+  const ORG = "22222222-2222-4222-8222-222222222222";
+  const notifyInput = (eventId: string): NewNotificationInput => ({
+    orgId: ORG,
+    audienceUserId: OWNER,
+    kind: "conversation_reply",
+    sourceKind: "conversation",
+    sourceRef: "33333333-3333-4333-8333-333333333333",
+    eventId,
+    title: "New reply",
+    body: "Your conversation has a new reply.",
+  });
+
+  it("recordNotification records a resolved notification (consumer write path)", async () => {
+    const result = await service.recordNotification({
+      kind: "notify",
+      notification: notifyInput("evt-1"),
+    });
+    expect(result).toMatchObject({ ok: true, value: { kind: "recorded" } });
+    expect(store.notifications).toHaveLength(1);
+    expect(store.notifications[0]!.eventId).toBe("evt-1");
+    expect(store.notifications[0]!.audienceUserId).toBe(OWNER);
+  });
+
+  it("D2.18-P1: duplicate eventId is a silent noop_duplicate - no second row", async () => {
+    await service.recordNotification({ kind: "notify", notification: notifyInput("evt-dup") });
+    const before = store.notifications.length;
+    const replay = await service.recordNotification({
+      kind: "notify",
+      notification: notifyInput("evt-dup"),
+    });
+    expect(replay).toMatchObject({ ok: true, value: { kind: "noop_duplicate" } });
+    expect(store.notifications).toHaveLength(before);
+  });
+
+  it("D2.18-P3: first insert writes exactly one same-tx audit row; replay adds none", async () => {
+    await service.recordNotification({ kind: "notify", notification: notifyInput("evt-a") });
+    expect(audit.entries).toEqual([
+      { action: "audience.notification_recorded", subjectId: store.notifications[0]!.id },
+    ]);
+    const after = audit.entries.length;
+    await service.recordNotification({ kind: "notify", notification: notifyInput("evt-a") });
+    expect(audit.entries).toHaveLength(after);
+  });
+
+  it("self-send resolution is suppressed without any write or audit", async () => {
+    const before = store.notifications.length;
+    const result = await service.recordNotification({ kind: "suppress_self_send" });
+    expect(result).toMatchObject({ ok: true, value: { kind: "noop_duplicate" } });
+    expect(store.notifications).toHaveLength(before);
+    expect(audit.entries).toHaveLength(0);
+  });
+
+  it("missing source rows and malformed events return typed errors, never throw", async () => {
+    const missing = await service.recordNotification({ kind: "noop_missing" });
+    expect(missing.ok).toBe(false);
+    const invalid = await service.recordNotification({
+      kind: "invalid_event",
+      message: "payload malformed",
+    });
+    expect(invalid.ok).toBe(false);
+    expect(store.notifications).toHaveLength(0);
+    expect(audit.entries).toHaveLength(0);
+  });
+
+  it("recipient/org id validation fails closed on non-uuid authority fields", async () => {
+    const bad = notifyInput("evt-bad");
+    const result = await service.recordNotification({
+      kind: "notify",
+      notification: { ...bad, audienceUserId: "not-a-uuid" },
+    });
+    expect(result.ok).toBe(false);
+    expect(store.notifications).toHaveLength(0);
+    expect(audit.entries).toHaveLength(0);
+  });
+
+  it("listNotifications is owner-scoped, newest first, and bounded", async () => {
+    for (let i = 0; i < 5; i++) {
+      await service.recordNotification({
+        kind: "notify",
+        notification: notifyInput(`evt-list-${i}`),
+      });
+    }
+    const other = await service.listNotifications({ userId: "99999999-9999-4999-8999-999999999999" });
+    expect(other).toHaveLength(0);
+    const rows = await service.listNotifications({ userId: OWNER });
+    expect(rows).toHaveLength(5);
+    const bounded = await service.listNotifications({ userId: OWNER }, { limit: 2 });
+    expect(bounded).toHaveLength(2);
+  });
+
+  it("D2.18-N5: unreadNotifications is the DERIVED count of read_at IS NULL", async () => {
+    for (let i = 0; i < 3; i++) {
+      await service.recordNotification({
+        kind: "notify",
+        notification: notifyInput(`evt-unread-${i}`),
+      });
+    }
+    expect(await service.unreadNotifications({ userId: OWNER })).toBe(3);
+    await service.markNotificationsRead({ userId: OWNER }, { all: true });
+    expect(await service.unreadNotifications({ userId: OWNER })).toBe(0);
+  });
+
+  it("D2.18-P2: mark-read { all: true } affects only the authenticated owner", async () => {
+    const otherUser = "99999999-9999-4999-8999-999999999999";
+    await service.recordNotification({ kind: "notify", notification: notifyInput("evt-o1") });
+    // Seed a foreign-owner row directly (the owner commands cannot create it).
+    const repo = makeRepo(store, audit);
+    await repo.insertNotificationIfAbsent({
+      orgId: ORG,
+      audienceUserId: otherUser,
+      kind: "conversation_reply",
+      sourceKind: "conversation",
+      sourceRef: null,
+      eventId: "evt-foreign",
+      title: "Foreign",
+      body: null,
+    });
+    const result = await service.markNotificationsRead({ userId: OWNER }, { all: true });
+    expect(result).toMatchObject({ ok: true, value: { updated: 1, unreadCount: 0 } });
+    const foreign = store.notifications.find((n) => n.eventId === "evt-foreign");
+    expect(foreign?.readAt).toBeNull();
+  });
+
+  it("D2.18-P2: mark-read { ids } ignores foreign-owner uuids and is idempotent", async () => {
+    await service.recordNotification({ kind: "notify", notification: notifyInput("evt-m1") });
+    const id = store.notifications[0]!.id;
+    const first = await service.markNotificationsRead({ userId: OWNER }, { ids: [id, "88888888-8888-4888-8888-888888888888"] });
+    expect(first).toMatchObject({ ok: true, value: { updated: 1, unreadCount: 0 } });
+    const second = await service.markNotificationsRead({ userId: OWNER }, { ids: [id] });
+    expect(second).toMatchObject({ ok: true, value: { updated: 0, unreadCount: 0 } });
+  });
+
+  it("owner read commands write NO audit (D2.14-2 precedent)", async () => {
+    await service.recordNotification({ kind: "notify", notification: notifyInput("evt-noaudit") });
+    const before = audit.entries.length;
+    await service.listNotifications({ userId: OWNER });
+    await service.unreadNotifications({ userId: OWNER });
+    await service.markNotificationsRead({ userId: OWNER }, { all: true });
     expect(audit.entries).toHaveLength(before);
   });
 });

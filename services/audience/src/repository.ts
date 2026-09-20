@@ -10,10 +10,11 @@
  *  - the ONLY mutation path is setStatus (published → unpublished);
  *  - all access is parameterized.
  */
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   audienceUsers,
   createDatabase,
+  notifications,
   publicContent,
   watchProgress,
   type Database,
@@ -23,7 +24,10 @@ import type {
   AudienceAuditWriter,
   AudienceRepository,
   AudienceTransaction,
+  MarkNotificationsReadInput,
+  NewNotificationInput,
   NewPublicContentInput,
+  NotificationRecord,
   PublicContentRecord,
   PublicContentStatus,
   WatchProgressRecord,
@@ -56,6 +60,20 @@ const toRecord = (row: PublicContentRow): PublicContentRecord => ({
   status: row.status as PublicContentStatus,
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
+});
+
+const toNotificationRecord = (row: typeof notifications.$inferSelect): NotificationRecord => ({
+  id: row.id,
+  orgId: row.orgId,
+  audienceUserId: row.audienceUserId,
+  kind: row.kind as NotificationRecord["kind"],
+  sourceKind: (row.sourceKind ?? null) as NotificationRecord["sourceKind"],
+  sourceRef: row.sourceRef ?? null,
+  eventId: row.eventId,
+  title: row.title,
+  body: row.body ?? null,
+  readAt: row.readAt ?? null,
+  createdAt: row.createdAt,
 });
 
 const insertValues = (input: NewPublicContentInput) => ({
@@ -211,6 +229,72 @@ const mutationsFor = (exec: Database, deps: DrizzleAudienceRepositoryDeps) => {
         .limit(limit);
       return rows.map((row) => ({ ...row, updatedAt: row.updatedAt.toISOString() }));
     },
+    // -----------------------------------------------------------------
+    // Stage 2.18 - notifications (owner-scoped audience state).
+    // -----------------------------------------------------------------
+    insertNotificationIfAbsent: async (input: NewNotificationInput): Promise<NotificationRecord | null> => {
+      // Idempotent by UNIQUE(event_id) (D2.18-P1): a duplicate/replayed
+      // event inserts NOTHING and returns null (no second row, no error).
+      const [row] = await exec
+        .insert(notifications)
+        .values({
+          orgId: input.orgId,
+          audienceUserId: input.audienceUserId,
+          kind: input.kind,
+          sourceKind: input.sourceKind,
+          sourceRef: input.sourceRef,
+          eventId: input.eventId,
+          title: input.title,
+          body: input.body,
+        })
+        .onConflictDoNothing({ target: notifications.eventId })
+        .returning();
+      return row ? toNotificationRecord(row) : null;
+    },
+    listNotificationsByUser: async (
+      audienceUserId: string,
+      limit: number,
+    ): Promise<readonly NotificationRecord[]> => {
+      const rows = await exec
+        .select()
+        .from(notifications)
+        .where(eq(notifications.audienceUserId, audienceUserId))
+        .orderBy(desc(notifications.createdAt))
+        .limit(limit);
+      return rows.map(toNotificationRecord);
+    },
+    countUnreadByUser: async (audienceUserId: string): Promise<number> => {
+      // D2.18-N5: the unread count is DERIVED - there is no counter column.
+      const [row] = await exec
+        .select({ n: sql<number>`count(*)::int` })
+        .from(notifications)
+        .where(and(eq(notifications.audienceUserId, audienceUserId), sql`${notifications.readAt} is null`));
+      return row?.n ?? 0;
+    },
+    markNotificationsRead: async (
+      audienceUserId: string,
+      input: MarkNotificationsReadInput,
+    ): Promise<number> => {
+      // Only the OWNER's rows, only where read_at IS NULL (repeated reads
+      // are idempotent; already-read rows keep their original read_at).
+      const ownerCondition = eq(notifications.audienceUserId, audienceUserId);
+      const unreadCondition = sql`${notifications.readAt} is null`;
+      let idCondition: ReturnType<typeof inArray> | undefined;
+      if ("all" in input) {
+        idCondition = undefined;
+      } else {
+        idCondition = inArray(notifications.id, [...input.ids]);
+      }
+      const where = idCondition
+        ? and(ownerCondition, unreadCondition, idCondition)
+        : and(ownerCondition, unreadCondition);
+      const rows = await exec
+        .update(notifications)
+        .set({ readAt: new Date() })
+        .where(where)
+        .returning({ id: notifications.id });
+      return rows.length;
+    },
     appendAudit: (entry: Parameters<AudienceAuditWriter["appendWithin"]>[1]) => {
       if (!deps.auditWriter) {
         throw new Error("audience audit writer not configured; mutations are not available in read-only compositions");
@@ -229,6 +313,7 @@ const transactionFor = (exec: Database, deps: DrizzleAudienceRepositoryDeps): Au
     insertContent: m.insertContent,
     setStatus: m.setStatus,
     appendAudit: m.appendAudit,
+    insertNotificationIfAbsent: m.insertNotificationIfAbsent,
   };
 };
 
@@ -247,6 +332,10 @@ export const createDrizzleAudienceRepository = (deps: DrizzleAudienceRepositoryD
     findPublishedContentById: (contentRef) => direct.findPublishedContentById(contentRef),
     upsertProgress: (input) => direct.upsertProgress(input),
     listProgressByUser: (audienceUserId, limit) => direct.listProgressByUser(audienceUserId, limit),
+    insertNotificationIfAbsent: (input) => direct.insertNotificationIfAbsent(input),
+    listNotificationsByUser: (audienceUserId, limit) => direct.listNotificationsByUser(audienceUserId, limit),
+    countUnreadByUser: (audienceUserId) => direct.countUnreadByUser(audienceUserId),
+    markNotificationsRead: (audienceUserId, input) => direct.markNotificationsRead(audienceUserId, input),
     // D2.4-1: the SAME connection runs the mutation and the audit append.
     runInTransaction: async <T>(work: (tx: AudienceTransaction) => Promise<T>): Promise<T> =>
       db.transaction(async (trx) => work(transactionFor(trx as unknown as Database, deps))),

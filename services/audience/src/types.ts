@@ -146,11 +146,15 @@ export interface AudienceAuditWriter {
   ): Promise<void>;
 }
 
-/** FROZEN audit actions (Stage 2.13): exactly these two. */
+/** FROZEN audit actions (Stage 2.13 + Stage 2.18 D2.18-P3). */
 export const AUDIENCE_AUDIT_ACTIONS = [
   "audience.public_content_projected",
   "audience.public_content_unpublished",
+  /** Stage 2.18: consumer-projection audit row (same tx as the insert). */
+  "audience.notification_recorded",
 ] as const;
+/** Stage 2.18 audit action for the notification consumer (index 2 above). */
+export const NOTIFICATION_RECORDED_AUDIT = "audience.notification_recorded" as const;
 
 /**
  * System-originated actor identity for audit rows written by the event
@@ -171,13 +175,93 @@ export type AudienceErrorReason =
   | "content_not_found"
   /** Stage 2.14: watch-progress command failures (owner-scoped audience state). */
   | "invalid_position"
-  | "user_not_found";
+  | "user_not_found"
+  | "unknown_notification";
 
 export const ok = <T>(value: T): AudienceCommandResult<T> => ({ ok: true, value });
 export const err = <T>(reason: AudienceErrorReason, message: string): AudienceCommandResult<T> => ({
   ok: false,
   error: { reason, message },
 });
+
+// ---------------------------------------------------------------------------
+// Stage 2.18 - IN-APP NOTIFICATIONS (D2.18-SELECT, D2.18-N1..N5)
+// ---------------------------------------------------------------------------
+
+/** Notification kinds. Stage 2.18 ships `conversation_reply` ONLY
+ *  (social kinds deferred per D2.18-N2 / D2.15-3). */
+export const NOTIFICATION_KINDS = ["conversation_reply"] as const;
+export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
+
+/** Owner-scoped source addressing (D2.13-4 precedent: opaque to the owner). */
+export const NOTIFICATION_SOURCE_KINDS = ["conversation"] as const;
+export type NotificationSourceKind = (typeof NOTIFICATION_SOURCE_KINDS)[number];
+
+/** Full durable row view (service-internal; never crosses the public API). */
+export interface NotificationRecord {
+  readonly id: string;
+  readonly orgId: string;
+  readonly audienceUserId: string;
+  readonly kind: NotificationKind;
+  readonly sourceKind: NotificationSourceKind | null;
+  readonly sourceRef: string | null;
+  readonly eventId: string;
+  readonly title: string;
+  readonly body: string | null;
+  /** NULL = unread. Unread count is DERIVED from this (D2.18-N5). */
+  readonly readAt: Date | null;
+  readonly createdAt: Date;
+}
+
+/**
+ * PUBLIC-SAFE PROJECTION (whitelist). Exactly the fields Media may see.
+ * `notificationRef` is the OPAQUE row id (owner-scoped addressing);
+ * eventId / orgId / audienceUserId are structurally ABSENT.
+ */
+export interface NotificationView {
+  readonly notificationRef: string;
+  readonly kind: NotificationKind;
+  readonly sourceRef?: string;
+  readonly title: string;
+  readonly body?: string;
+  readonly readAt: string | null;
+  readonly createdAt: string;
+}
+
+/** Consumer input for recordNotification - fully resolved server-side. */
+export interface NewNotificationInput {
+  readonly orgId: string;
+  readonly audienceUserId: string;
+  readonly kind: NotificationKind;
+  readonly sourceKind: NotificationSourceKind | null;
+  readonly sourceRef: string | null;
+  readonly eventId: string;
+  readonly title: string;
+  readonly body: string | null;
+}
+
+/** Owner-facing mark-read selector (D2.18-P2). */
+export type MarkNotificationsReadInput =
+  | { readonly all: true }
+  | { readonly ids: readonly string[] };
+
+/** Outcome of an owner-scoped mark-read. */
+export interface MarkNotificationsReadOutcome {
+  readonly updated: number;
+  readonly unreadCount: number;
+}
+
+/**
+ * Server-side resolution of a committed `message.created` fact (D2.18-N1):
+ * the composition root reads the durable message + conversation rows and
+ * hands the FULLY RESOLVED recipient/preview here. `services/audience`
+ * stays messaging-agnostic - it never imports Messaging internals.
+ */
+export type NotificationResolution =
+  | { readonly kind: "notify"; readonly notification: NewNotificationInput }
+  | { readonly kind: "suppress_self_send" }
+  | { readonly kind: "noop_missing" }
+  | { readonly kind: "invalid_event"; readonly message: string };
 
 // ---------------------------------------------------------------------------
 // Repository port (implemented by the Drizzle adapter in repository.ts)
@@ -225,6 +309,20 @@ export interface AudienceRepository {
   }): Promise<WatchProgressRecord>;
   /** Owner-scoped list, newest first. */
   listProgressByUser(audienceUserId: string, limit: number): Promise<readonly WatchProgressRecord[]>;
+  // ---------------------------------------------------------------------
+  // Stage 2.18 - NOTIFICATIONS (audience-owner state; consumer write path).
+  // ---------------------------------------------------------------------
+  /** Insert (consumer); idempotent by UNIQUE(event_id) - null on conflict. */
+  insertNotificationIfAbsent(input: NewNotificationInput): Promise<NotificationRecord | null>;
+  /** Owner-scoped feed, newest first. */
+  listNotificationsByUser(audienceUserId: string, limit: number): Promise<readonly NotificationRecord[]>;
+  /** D2.18-N5: DERIVED unread count - COUNT(read_at IS NULL). */
+  countUnreadByUser(audienceUserId: string): Promise<number>;
+  /** Mark read: only the owner's rows, only where read_at IS NULL. */
+  markNotificationsRead(
+    audienceUserId: string,
+    input: MarkNotificationsReadInput,
+  ): Promise<number>;
   /** D2.4-1: transaction scope for mutation + same-tx audit. */
   runInTransaction<T>(work: (tx: AudienceTransaction) => Promise<T>): Promise<T>;
 }
@@ -245,6 +343,8 @@ export interface AudienceTransaction {
     readonly causationId?: string | null;
     readonly payload?: Record<string, unknown>;
   }): Promise<void>;
+  /** Stage 2.18: idempotent notification insert (UNIQUE(event_id) backstop). */
+  insertNotificationIfAbsent(input: NewNotificationInput): Promise<NotificationRecord | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -282,7 +382,31 @@ export interface AudienceService {
     principal: { readonly userId: string },
     input: { readonly contentRef: string; readonly positionSeconds: number },
   ): Promise<AudienceCommandResult<WatchProgressUpsertOutcome>>;
+  // ---------------------------------------------------------------------
+  // Stage 2.18 - NOTIFICATIONS. recordNotification is the CONSUMER write
+  // path (system-originated, idempotent by eventId); the owner commands
+  // take the SERVER-DERIVED audience principal and never accept user/org
+  // authority from callers.
+  // ---------------------------------------------------------------------
+  /** Consumer: insert one notification (idempotent by eventId) + same-tx audit. */
+  recordNotification(
+    resolution: NotificationResolution,
+  ): Promise<AudienceCommandResult<RecordNotificationOutcome>>;
+  /** Owner: feed, newest first. */
+  listNotifications(principal: { readonly userId: string }, query?: { readonly limit?: number }): Promise<readonly NotificationRecord[]>;
+  /** Owner: derived unread count (D2.18-N5). */
+  unreadNotifications(principal: { readonly userId: string }): Promise<number>;
+  /** Owner: mark read (NULL->set only; foreign-owner ids no-op; idempotent). */
+  markNotificationsRead(
+    principal: { readonly userId: string },
+    input: MarkNotificationsReadInput,
+  ): Promise<AudienceCommandResult<MarkNotificationsReadOutcome>>;
 }
+
+/** Discriminated outcome of the consumer's recordNotification. */
+export type RecordNotificationOutcome =
+  | { readonly kind: "recorded"; readonly notificationId: string }
+  | { readonly kind: "noop_duplicate" };
 // ---------------------------------------------------------------------------
 // Stage 2.14 - WATCH PROGRESS (audience platform state, DM section 21)
 // ---------------------------------------------------------------------------

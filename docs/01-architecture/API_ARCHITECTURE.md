@@ -243,6 +243,13 @@ Preserved exactly, unchanged:
 
 Public-safe + audience-private surface, rooted at `/api/media/*`:
 
+> **Stage 2.18 route note:** the in-app notifications surface is implemented at
+> `/api/me/notifications` (GET, owner feed + derived unread count) and
+> `/api/me/notifications/read` (POST, strict `{ all: true } | { ids }` union) —
+> the own-state family below lists the same capabilities under the
+> representative `/api/media/me/...` shape (see §13 of the implementation plan
+> for the Stage 2.17-era route-shape precedent).
+
 | Family | Routes (representative) | Command/Query | Auth state | Backed by |
 |---|---|---|---|---|
 | **Content reads** | `GET /api/media/content` (home / discover / trending / recommendations via mode), `GET /api/media/content/[slug]` | Query | anonymous | publishing + audience public read models; slugs only, never internal production IDs |

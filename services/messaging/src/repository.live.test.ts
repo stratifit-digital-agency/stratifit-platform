@@ -4,7 +4,7 @@
  * Runs only when the git-ignored root .env provides both database URLs;
  * proves against the LIVE remote through the RUNTIME role (DATABASE_URL /
  * stratifit_runtime) — the privilege boundary production uses:
- *   - runtime grants map = 52 distinct tables incl. the six Messaging tables
+ *   - runtime grants map = 53 distinct tables incl. the six Messaging tables
  *     (conversations/messages/service_offerings/service_inquiries = ARWD;
  *     messages/lead_follow_ups = INSERT+SELECT immutable family);
  *   - RLS enabled with exactly the runtime_all policy TO stratifit_runtime;
@@ -178,7 +178,7 @@ d("messaging live — grants / RLS / constraints", () => {
     { timeout: 30_000 },
     async () => {
       const [counts] = await runtimeSql!`select count(distinct table_name)::int as n from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_schema = 'public'`;
-      expect(counts!.n).toBe(52);
+      expect(counts!.n).toBe(53);
 
     for (const t of ["conversations", "messages", "service_offerings", "service_inquiries", "service_leads", "lead_follow_ups"]) {
       const rls = (await runtimeSql!`select relrowsecurity as rls from pg_class where relname = ${t} and relnamespace = 'public'::regnamespace`)[0]!.rls as boolean;
