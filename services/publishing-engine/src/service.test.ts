@@ -178,12 +178,16 @@ const makeDeps = (store: Store, over: Partial<Parameters<typeof createPublishing
   const events: { name: string; payload: Record<string, unknown> }[] = [];
   const service = createPublishingService({
     repository: makeRepo(store),
-    // Mirrors the real composition port: unsupported kinds return the
-    // fail-closed variant (D2.12-D).
+    // Mirrors the real composition port: campaign_creative returns the
+    // fail-closed variant (D2.12-D); ai_creator_profile resolves only when
+    // the test's fake creator port says so (Stage 2.16 D2.16-6 — this suite
+    // keeps the pre-People default of fail-closed).
     resolveSubject: async (_orgId, subjectKind) =>
-      subjectKind === "ai_creator_profile" || subjectKind === "campaign_creative"
+      subjectKind === "campaign_creative"
         ? { kind: subjectKind, unsupported: true as const }
-        : { kind: subjectKind as "production" | "asset_version", orgId: "org-1" },
+        : subjectKind === "ai_creator_profile"
+          ? null
+          : { kind: subjectKind as "production" | "asset_version", orgId: "org-1" },
     resolveEligibility: makeGate(),
     adapters: [{ target: "stratifit-media", publish: async (payload) => ({ externalId: `ext-${payload.publicationId}` }) }],
     publisher: {
@@ -275,13 +279,17 @@ describe("createPublication", () => {
     expect(events).toHaveLength(1); // no second created event
   });
 
-  it("fails closed for unsupported subject kinds (D2.12-D)", async () => {
-    for (const kind of ["ai_creator_profile", "campaign_creative"] as const) {
-      const result = await service.createPublication(makeActor(), createInput({ subjectKind: kind }));
-      expect(result.ok).toBe(false);
-      if (result.ok) continue;
-      expect(result.error.reason).toBe("subject_unsupported");
-    }
+  it("fails closed for unsupported/unresolvable subject kinds (D2.12-D + Stage 2.16 D2.16-6)", async () => {
+    // campaign_creative: structurally unsupported until Advertising exists.
+    const unsupported = await service.createPublication(makeActor(), createInput({ subjectKind: "campaign_creative" }));
+    expect(unsupported.ok).toBe(false);
+    if (!unsupported.ok) expect(unsupported.error.reason).toBe("subject_unsupported");
+    // ai_creator_profile: resolvable through the narrow People subject port —
+    // with NO active profile (this suite's port returns null) it FAILS CLOSED
+    // as subject_not_found (IDOR-safe, no existence leak).
+    const unresolvable = await service.createPublication(makeActor(), createInput({ subjectKind: "ai_creator_profile" }));
+    expect(unresolvable.ok).toBe(false);
+    if (!unresolvable.ok) expect(unresolvable.error.reason).toBe("subject_not_found");
   });
 
   it("fails closed for cross-org and absent subjects (IDOR-safe)", async () => {

@@ -40,9 +40,11 @@ describe("follow body schema (strict)", () => {
 
   it("accepts a valid followeeRef and rejects extra authority fields", () => {
     expect(followBodySchema.safeParse(valid).success).toBe(true);
-    expect(followBodySchema.safeParse({ ...valid, followeeKind: "creator_profile" }).success).toBe(false);
+    // Stage 2.16 (D2.16-5): followeeKind is now an ACCEPTED kind selector
+    // (audience_user | creator_profile) — authority fields are still rejected.
+    expect(followBodySchema.safeParse({ ...valid, followeeKind: "creator_profile" }).success).toBe(true);
     expect(followBodySchema.safeParse({ ...valid, userId: "hax" }).success).toBe(false);
-    // The BFF hard-codes audience_user targets — creator follows stay fail-closed upstream.
+    expect(followBodySchema.safeParse({ ...valid, emailVerified: true }).success).toBe(false);
   });
 
   it("rejects malformed uuids", () => {

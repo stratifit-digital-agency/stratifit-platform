@@ -90,11 +90,11 @@ const provisionTenant = async (tag: string) => {
 
 d("social live proofs (runtime role)", () => {
   it(
-    "runtime grants map = 41 distinct tables with all five social tables ARWD",
+    "runtime grants map = 46 distinct tables (41 + five Stage 2.16 People tables) with all five social tables ARWD",
     { timeout: 30_000 },
     async () => {
       const [counts] = await runtimeSql!`select count(distinct table_name)::int as n from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_schema = 'public'`;
-      expect(counts!.n).toBe(41);
+      expect(counts!.n).toBe(46);
       for (const table of ["likes", "saves", "follow_graph", "comments", "shares"]) {
         const [row] = await runtimeSql!`select string_agg(privilege_type, ',' order by privilege_type) as privs from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_name = ${table} and table_schema = 'public'`;
         expect(row!.privs).toBe("DELETE,INSERT,SELECT,UPDATE");

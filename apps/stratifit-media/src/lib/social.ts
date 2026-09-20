@@ -30,6 +30,13 @@ const reader = socialReaderFromRepository(repository);
 /** ONE shared service instance over the shared repository. */
 const service: SocialService = createSocialService({ repository });
 
+/**
+ * Stage 2.16 (D2.16-5): creator-profile follow targets are live. Media BFF
+ * passes the creator-follow ref straight through — the SOCIAL service owns
+ * the target resolution via its port; Media itself gains no People API
+ * surface here and cannot fabricate targets (strict route schemas only).
+ */
+
 /** Build the server-derived principal from the resolved media identity. */
 export const principalOf = (identity: { userId: string; emailVerified: boolean }): SocialPrincipal => ({
   userId: identity.userId,
@@ -94,6 +101,13 @@ export const follow = async (p: SocialPrincipal, followeeRef: string) =>
 
 export const unfollow = async (p: SocialPrincipal, followeeRef: string) =>
   mapResult(service.unfollow(p, { followeeKind: "audience_user", followeeRef }));
+
+/** D2.16-5: creator-profile follow/unfollow (target resolved server-side). */
+export const followCreator = async (p: SocialPrincipal, profileRef: string) =>
+  mapResult(service.follow(p, { followeeKind: "creator_profile", followeeRef: profileRef }));
+
+export const unfollowCreator = async (p: SocialPrincipal, profileRef: string) =>
+  mapResult(service.unfollow(p, { followeeKind: "creator_profile", followeeRef: profileRef }));
 
 export const comment = async (
   p: SocialPrincipal,

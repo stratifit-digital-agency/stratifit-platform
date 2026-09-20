@@ -53,6 +53,10 @@ const elementTypes = [
   // Stage 2.15 (D2.15-5): social owns the five-family audience social graph
   // (likes/saves/follows/comments/shares) and its public-safe read API.
   { type: "public-service", pattern: "services/social/**", mode: "full" },
+  // Stage 2.16: people owns the five-aggregate AI-creator chain and the
+  // publication-authored creator_profiles snapshot family (public-safe read
+  // API composed by Media's creators surface; D2.16-8).
+  { type: "public-service", pattern: "services/people/**", mode: "full" },
   { type: "control-app", pattern: "apps/stratifit-control/**", mode: "full" },
   { type: "media-app", pattern: "apps/stratifit-media/**", mode: "full" },
 ];

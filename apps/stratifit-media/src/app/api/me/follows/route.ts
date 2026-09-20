@@ -1,4 +1,4 @@
-import { follow, unfollow } from "@/lib/social";
+import { follow, unfollow, followCreator, unfollowCreator } from "@/lib/social";
 import { followBodySchema, requirePrincipal, unauthorized, writeResponse } from "@/lib/social-route";
 
 export const dynamic = "force-dynamic";
@@ -17,7 +17,12 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return writeResponse({ ok: false, reason: "invalid_body", message: "Invalid body." });
   }
-  return writeResponse(await follow(principal, parsed.data.followeeRef), 201);
+  const followeeKind = parsed.data.followeeKind ?? "audience_user";
+  const result =
+    followeeKind === "creator_profile"
+      ? await followCreator(principal, parsed.data.followeeRef)
+      : await follow(principal, parsed.data.followeeRef);
+  return writeResponse(result, 201);
 }
 
 /** DELETE /api/me/follows — unfollow (tombstone; idempotent). */
@@ -34,5 +39,10 @@ export async function DELETE(request: Request) {
   if (!parsed.success) {
     return writeResponse({ ok: false, reason: "invalid_body", message: "Invalid body." });
   }
-  return writeResponse(await unfollow(principal, parsed.data.followeeRef));
+  const followeeKind = parsed.data.followeeKind ?? "audience_user";
+  const result =
+    followeeKind === "creator_profile"
+      ? await unfollowCreator(principal, parsed.data.followeeRef)
+      : await unfollow(principal, parsed.data.followeeRef);
+  return writeResponse(result);
 }

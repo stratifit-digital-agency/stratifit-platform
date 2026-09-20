@@ -297,7 +297,7 @@ describe("follows (tombstone lifecycle, D2.15-1/2)", () => {
     expectErr(await svc.follow(verified, { followeeKind: "audience_user", followeeRef: verified.userId }), "self_follow");
   });
 
-  it("creator-profile targets FAIL CLOSED (creator_targets_unsupported) — no row is invented", async () => {
+  it("creator-profile targets FAIL CLOSED without a People port (legacy compositions) — no row is invented", async () => {
     const repo = new FakeRepo();
     const svc = createSocialService({ repository: repo });
     expectErr(
@@ -305,6 +305,48 @@ describe("follows (tombstone lifecycle, D2.15-1/2)", () => {
       "creator_targets_unsupported",
     );
     expect(repo.follows.size).toBe(0);
+  });
+
+  // Stage 2.16 (D2.16-5): with the narrow People follow port wired, creator
+  // follows become executable against ACTIVE profiles only.
+  it("creator follow works against an ACTIVE profile; duplicate keeps one row (D2.16-5)", async () => {
+    const repo = new FakeRepo();
+    const profileId = uuid(77);
+    const svc = createSocialService({
+      repository: repo,
+      creatorFollowPort: { findActiveProfileById: async (id) => (id === profileId ? { id, orgId: "org-1", handle: "ava" } : null) },
+    });
+    expectOk(await svc.follow(verified, { followeeKind: "creator_profile", followeeRef: profileId }));
+    expectOk(await svc.follow(verified, { followeeKind: "creator_profile", followeeRef: profileId }));
+    const rows = [...repo.follows.values()].filter((f) => f.followeeKind === "creator_profile" && f.deletedAt === null);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.followeeCreatorProfileRef).toBe(profileId);
+  });
+
+  it("creator follow of a NONEXISTENT or INACTIVE profile fails closed; no row", async () => {
+    const repo = new FakeRepo();
+    const svc = createSocialService({
+      repository: repo,
+      creatorFollowPort: { findActiveProfileById: async () => null },
+    });
+    expectErr(await svc.follow(verified, { followeeKind: "creator_profile", followeeRef: uuid(78) }), "parent_not_found");
+    expect(repo.follows.size).toBe(0);
+  });
+
+  it("creator unfollow tombstones; re-follow reactivates the SAME row (D2.15-2 preserved)", async () => {
+    const repo = new FakeRepo();
+    const profileId = uuid(79);
+    const svc = createSocialService({
+      repository: repo,
+      creatorFollowPort: { findActiveProfileById: async (id) => (id === profileId ? { id, orgId: "org-1", handle: "ava" } : null) },
+    });
+    expectOk(await svc.follow(verified, { followeeKind: "creator_profile", followeeRef: profileId }));
+    const originalId = [...repo.follows.values()][0]!.id;
+    expectOk(await svc.unfollow(verified, { followeeKind: "creator_profile", followeeRef: profileId }));
+    expect(repo.follows.get(originalId)!.deletedAt).not.toBeNull();
+    expectOk(await svc.follow(verified, { followeeKind: "creator_profile", followeeRef: profileId }));
+    expect(repo.follows.size).toBe(1);
+    expect(repo.follows.get(originalId)!.deletedAt).toBeNull();
   });
 
   it("asymmetry: A→B does not create B→A", async () => {

@@ -8,10 +8,15 @@ import {
   assetVersions,
   assets,
   auditLog,
+  aiCreators,
   audienceUsers,
+  characters,
   comments,
+  creatorProfiles,
+  digitalHumans,
   followGraph,
   likes,
+  personas,
   saves,
   shares,
   computeRequirements,
@@ -121,6 +126,11 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         "followGraph",
         "comments",
         "shares",
+        "digitalHumans",
+        "characters",
+        "personas",
+        "aiCreators",
+        "creatorProfiles",
         "workflowVersions",
         "workflows",
       ].sort(),
@@ -353,6 +363,15 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   follow_graph: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   comments: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   shares: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  // Stage 2.16 (People chain foundation): four Control-authored mutable
+  // chain aggregates + the publication-authored creator_profiles snapshot
+  // family (D2.16-3: no arbitrary profile edit path). All runtime arwd,
+  // role-scoped runtime_all; D2.16-2: Rights seam unwired.
+  digital_humans: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  characters: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  personas: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  ai_creators: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  creator_profiles: ["DELETE", "INSERT", "SELECT", "UPDATE"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -500,7 +519,8 @@ describe("domain-table guard (per approved plan)", () => {
       "shots",
       // "publications" graduated to an approved bounded context in Stage
       // 2.12 (Publishing Foundation) — it is no longer forbidden.
-      "aiCreators",
+      // "aiCreators" graduated in Stage 2.16 (People: AI Creator & Public
+      // Profile Foundation, D2.16-1 chain-only five-table scope).
       "conversations",
       "messages",
       "auditLogs",

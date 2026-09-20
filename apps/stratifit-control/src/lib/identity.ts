@@ -51,6 +51,12 @@ import {
   type PublishingService,
 } from "@stratifit/publishing-engine";
 import { createAudienceService, createDrizzleAudienceRepository, slugify, type AudienceService } from "@stratifit/audience";
+import {
+  createPeopleService,
+  createDrizzlePeopleRepository,
+  createCreatorSubjectPort,
+  type PeopleService,
+} from "@stratifit/people";
 import { InProcessEventPublisher, idempotent } from "@stratifit/events";
 import type { DomainEventEnvelope } from "@stratifit/contracts";
 import { createDatabase } from "@stratifit/database";
@@ -89,6 +95,7 @@ let services: {
   qualityControl: QcService;
   publishing: PublishingService;
   audience: AudienceService;
+  people: PeopleService;
 } | null = null;
 
 const buildServices = () => {
@@ -117,7 +124,78 @@ const buildServices = () => {
         console.error("[audience] consumer failed:", envelope.name, result.error.reason, result.error.message);
       }
     });
-    const eventBus = new InProcessEventPublisher([audienceHandler]);
+    // Stage 2.16 (D2.16-3): publication-mediated PEOPLE profile snapshots on
+    // the SAME bus. The snapshot subject is derived SERVER-SIDE from the
+    // durable publication record + the event envelope (never a client body):
+    // the published payload carries publicationId/versionId; the durable
+    // publication row supplies subject_kind/subject_ref (the AI creator id)
+    // and the publishing-owned title/synopsis snapshot fields. Idempotent by
+    // publication_version_id; a consumer failure does NOT roll back the
+    // already-committed publication — it is observable here and repairable
+    // through republishing (approved mediation semantics).
+    const peopleHandler = idempotent(async (envelope: DomainEventEnvelope) => {
+      if (envelope.name !== "publication.published" && envelope.name !== "publication.unpublished") {
+        return;
+      }
+      const payload = envelope.payload as Record<string, unknown>;
+      const publicationId = payload.publicationId;
+      const orgId = envelope.correlation?.organizationId;
+      if (typeof publicationId !== "string" || typeof orgId !== "string") return;
+      try {
+        if (envelope.name === "publication.published") {
+          const versionId = payload.versionId;
+          if (typeof versionId !== "string") return;
+          // Resolve the durable publication row — the server-side subject source.
+          const { publications, publicationVersions } = await import("@stratifit/database");
+          const [pub] = await db
+            .select()
+            .from(publications)
+            .where(eq(publications.id, publicationId))
+            .limit(1);
+          if (!pub || pub.subjectKind !== "ai_creator_profile") return; // not a people subject
+          const [version] = await db
+            .select()
+            .from(publicationVersions)
+            .where(eq(publicationVersions.id, versionId))
+            .limit(1);
+          if (!version) return;
+          const result = await services!.people.upsertProfileSnapshot({
+            orgId,
+            aiCreatorId: pub.subjectRef, // server-derived — never client-supplied
+            publicationId: pub.id,
+            publicationVersionId: version.id,
+            handle: version.title, // publishable snapshot fields from the immutable version
+            displayName: version.title,
+            bio: version.synopsis ?? null,
+            personalitySnapshot: {},
+            interestsSnapshot: [],
+            avatarRef: null,
+            posterRef: null,
+            messagingEnabled: false,
+          });
+          if (!result.ok) {
+            console.error("[people] snapshot failed:", result.error.reason, result.error.message);
+          }
+        } else {
+          // publication.unpublished → retire the CURRENT snapshot. Resolve the
+          // subject server-side from the durable publication row.
+          const { publications } = await import("@stratifit/database");
+          const [pub] = await db
+            .select()
+            .from(publications)
+            .where(eq(publications.id, publicationId))
+            .limit(1);
+          if (!pub || pub.subjectKind !== "ai_creator_profile") return;
+          const result = await services!.people.unpublishCurrentSnapshot({ orgId, aiCreatorId: pub.subjectRef });
+          if (!result.ok) {
+            console.error("[people] unpublish failed:", result.error.reason, result.error.message);
+          }
+        }
+      } catch (e) {
+        console.error("[people] consumer failed:", envelope.name, e);
+      }
+    });
+    const eventBus = new InProcessEventPublisher([audienceHandler, peopleHandler]);
     // Stage 2.9: narrow Catalog resolution ports over the SAME pool — the
     // generation service reads (never writes) the Stage 2.8 catalog families
     // through these structural seams (SVC sanctioned import: generation ──► ai,
@@ -421,7 +499,16 @@ const buildServices = () => {
         }),
         resolveSubject: async (orgId, subjectKind, subjectRef) => {
           const { assetVersions, productions } = await import("@stratifit/database");
-          if (subjectKind === "ai_creator_profile" || subjectKind === "campaign_creative") {
+          // Stage 2.16 (D2.16-6): ai_creator_profile subjects are now DURABLY
+          // resolvable — the creator must be ACTIVE and carry a live (status
+          // = active) current profile in the SAME organization, through the
+          // narrow read-only CreatorSubjectPort seam. Same-org + fail-closed
+          // semantics preserved (cross-org/absent → null → subject_not_found).
+          if (subjectKind === "ai_creator_profile") {
+            const subject = await createCreatorSubjectPort({ db }).resolveActiveSubject(orgId, subjectRef);
+            return subject ? { kind: "ai_creator_profile" as const, orgId: subject.orgId } : null;
+          }
+          if (subjectKind === "campaign_creative") {
             return { kind: subjectKind, unsupported: true } as const;
           }
           if (subjectKind === "asset_version") {
@@ -531,6 +618,32 @@ const buildServices = () => {
         }),
         slugify,
       }),
+      // Stage 2.16: the People service shares the SAME Drizzle pool and the
+      // SAME audit transaction writer (D2.4-1 reused): a People mutation and
+      // its audit record commit in the SAME transaction. The rights seam
+      // (D2.16-2) is DECLARED but UNWIRED — absent port = vacuous pass. No
+      // Rights tables/records/service exist.
+      people: createPeopleService({
+        repository: createDrizzlePeopleRepository({
+          db,
+          auditWriter: {
+            appendWithin: (tx, entry) =>
+              writer.appendWithin(tx as Parameters<typeof writer.appendWithin>[0], {
+                actorId: entry.actorId,
+                action: entry.action,
+                subjectKind: entry.targetType,
+                subjectId: entry.targetId,
+                organizationId: entry.organizationId ?? null,
+                correlationId: entry.correlationId ?? null,
+                causationId: entry.causationId ?? null,
+                payload: entry.metadata ?? {},
+              }),
+          },
+        }),
+        // D2.16-2: NO rights port injected — production composition leaves
+        // the seam unwired (vacuous pass). A future Rights stage adds the
+        // adapter here.
+      }),
       membership: createMembershipService({
         repository: membershipRepo,
         // D2.4-1: transaction path is primary; this fallback seam is unused
@@ -579,6 +692,9 @@ export const getAssetService = (): AssetService => buildServices().assets;
 export const getQcService = (): QcService => buildServices().qualityControl;
 
 export const getPublishingService = (): PublishingService => buildServices().publishing;
+
+/** Exposed for the Stage 2.16 /api/control/people routes (D2.16-4). */
+export const getPeopleService = (): PeopleService => buildServices().people;
 
 /** Resolve the current operator server-side; null when anonymous/unprovisioned. */
 export const resolveControlOperator = async (): Promise<ControlOperatorContext | null> => {

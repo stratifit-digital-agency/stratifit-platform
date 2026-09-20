@@ -71,6 +71,7 @@ const authorize = (
 
 export const createSocialService = (deps: SocialServiceDeps): SocialService => {
   const repo = deps.repository;
+  const creatorFollowPort = deps.creatorFollowPort;
 
   /** Owner context: the audience user's own org row (server-derived). */
   const ownerOf = async (
@@ -150,10 +151,36 @@ export const createSocialService = (deps: SocialServiceDeps): SocialService => {
       const owner = await ownerOf(principal);
       if (!owner.ok) return owner;
 
-      // D2.15-1: creator-profile targets are structurally supported but
-      // FAIL CLOSED until People is durable — never invent profile rows.
+      // Stage 2.16 (D2.16-5): creator-profile follow targets are now
+      // EXECUTABLE against an ACTIVE creator_profiles row through the narrow
+      // read-only People port. Fail-closed preserved: absent port (legacy
+      // composition), nonexistent profile, or INACTIVE profile all fail
+      // closed; the port resolves ACTIVE profiles only, and the row's org is
+      // taken from the profile (org binding follows the owner — no client org).
       if (input.followeeKind === "creator_profile") {
-        return err("creator_targets_unsupported", "creator follows require the People bounded context");
+        if (!creatorFollowPort) {
+          return err("creator_targets_unsupported", "creator follows require the People bounded context");
+        }
+        if (!UUID_RE.test(input.followeeRef)) {
+          return err("parent_not_found", "followeeRef must be a valid uuid");
+        }
+        const profile = await creatorFollowPort.findActiveProfileById(input.followeeRef);
+        if (!profile) {
+          return err("parent_not_found", "creator profile does not exist or is not active");
+        }
+        const existing = await repo.findFollowAnyState(principal.userId, "creator_profile", input.followeeRef);
+        if (!existing) {
+          await repo.insertFollow({
+            orgId: owner.value.orgId,
+            followerId: principal.userId,
+            followeeKind: "creator_profile",
+            followeeAudienceUserId: null,
+            followeeCreatorProfileRef: profile.id,
+          });
+        } else if (existing.deletedAt !== null) {
+          await repo.reactivateFollow(existing.id);
+        }
+        return ok({ kind: "following", followeeRef: input.followeeRef });
       }
       if (!UUID_RE.test(input.followeeRef)) {
         return err("parent_not_found", "followeeRef must be a valid uuid");
@@ -187,7 +214,19 @@ export const createSocialService = (deps: SocialServiceDeps): SocialService => {
       if (!owner.ok) return owner;
 
       if (input.followeeKind === "creator_profile") {
-        return err("creator_targets_unsupported", "creator follows require the People bounded context");
+        // D2.16-5: unfollow mirrors follow — tombstone the relationship row.
+        // Never-followed or already-tombstoned targets are idempotent no-ops.
+        if (!creatorFollowPort) {
+          return err("creator_targets_unsupported", "creator follows require the People bounded context");
+        }
+        if (!UUID_RE.test(input.followeeRef)) {
+          return err("parent_not_found", "followeeRef must be a valid uuid");
+        }
+        const existing = await repo.findFollowAnyState(principal.userId, "creator_profile", input.followeeRef);
+        if (existing && existing.deletedAt === null) {
+          await repo.setFollowDeleted(existing.id, new Date());
+        }
+        return ok({ kind: "unfollowed", followeeRef: input.followeeRef });
       }
       if (!UUID_RE.test(input.followeeRef)) {
         return err("parent_not_found", "followeeRef must be a valid uuid");

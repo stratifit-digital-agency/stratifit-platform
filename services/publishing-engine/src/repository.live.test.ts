@@ -92,10 +92,15 @@ const operatorActor = (orgId: string): PublicationActor => ({
   correlationId: null,
 });
 
-/** Resolve a subject inside the tenant org (subjects are bare UUIDs here). */
+/** Resolve a subject inside the tenant org (subjects are bare UUIDs here).
+ * Stage 2.16: ai_creator_profile remains FAIL-CLOSED here (no People rows are
+ * provisioned in this suite), matching the campaign_creative unsupported arm. */
 const subjectPort = () => async (orgId: string, kind: string, ref: string) => {
-  if (kind === "ai_creator_profile" || kind === "campaign_creative") {
+  if (kind === "campaign_creative") {
     return { kind, unsupported: true } as const;
+  }
+  if (kind === "ai_creator_profile") {
+    return null; // no durable People subject in this suite → fail closed
   }
   return { kind: kind as "production" | "asset_version", orgId, ref };
 };
@@ -299,12 +304,15 @@ d("Publishing family live proofs (runtime role; every probe self-rolls-back)", {
     }
   });
 
-  it("fail-closed subjects: ai_creator_profile → subject_unsupported (D2.12-D)", async () => {
+  it("fail-closed subjects: ai_creator_profile with no durable People subject → subject_not_found (D2.12-D + Stage 2.16 D2.16-6)", async () => {
     const orgA = (
       await adminSql!`insert into organizations (name, slug) values (${`PUB Live E ${tag()}`}, ${`pub-live-e-${tag()}`}) returning id`
     )[0]!.id as string;
     try {
       const svc = makeService();
+      // Stage 2.16: ai_creator_profile resolves through the narrow People
+      // subject port — with NO active AI creator + profile in this tenant it
+      // fails CLOSED (subject_not_found, IDOR-safe, no existence leak).
       const result = await svc.createPublication(operatorActor(orgA), {
         subjectKind: "ai_creator_profile",
         subjectRef: uuid(),
@@ -313,7 +321,7 @@ d("Publishing family live proofs (runtime role; every probe self-rolls-back)", {
         title: "No Creator Contexts Yet",
       });
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.error.reason).toBe("subject_unsupported");
+      if (!result.ok) expect(result.error.reason).toBe("subject_not_found");
     } finally {
       await cleanupTenant(orgA);
     }

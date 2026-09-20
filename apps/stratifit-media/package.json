@@ -16,6 +16,7 @@
     "@stratifit/auth": "workspace:*",
     "@stratifit/contracts": "workspace:*",
     "@stratifit/identity": "workspace:*",
+    "@stratifit/people": "workspace:*",
     "@stratifit/publishing-engine": "workspace:*",
     "@stratifit/social": "workspace:*",
     "@stratifit/ui": "workspace:*",

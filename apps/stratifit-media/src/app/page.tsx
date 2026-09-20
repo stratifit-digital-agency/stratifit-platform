@@ -4,6 +4,7 @@ import { getProgress, toProgressView } from "@/lib/progress";
 import { publicContentReader } from "@/lib/content";
 import { principalOf, listFollows, listLikes, listSaves } from "@/lib/social";
 import { SocialActions } from "@/app/components/social-actions";
+import { CreatorDirectory } from "@/app/components/creator-directory";
 
 export const dynamic = "force-dynamic";
 
@@ -125,6 +126,12 @@ export default async function HomePage() {
           </ul>
         </section>
       ) : null}
+
+      {/* Stage 2.16 (D2.16-8): minimal public creator directory — active
+          profiles only, public-safe whitelist, data-bound to /api/creators. */}
+      <div className="mt-8">
+        <CreatorDirectory limit={12} />
+      </div>
     </main>
   );
 }

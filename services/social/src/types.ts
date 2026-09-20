@@ -220,6 +220,18 @@ export interface SocialPrincipal {
 
 export interface SocialServiceDeps {
   readonly repository: SocialRepository;
+  /**
+   * Stage 2.16 (D2.16-5): narrow read-only creator-follow port over People.
+   * OPTIONAL at the type level for backward compatibility with existing
+   * compositions, but REQUIRED for creator_profile follow targets — when
+   * absent, creator targets keep the Stage 2.15 fail-closed behavior
+   * (creator_targets_unsupported). No new Social table, no Social events.
+   */
+  readonly creatorFollowPort?: {
+    findActiveProfileById(
+      profileId: string,
+    ): Promise<{ readonly id: string; readonly orgId: string; readonly handle: string } | null>;
+  };
 }
 
 export interface ToggleInput {

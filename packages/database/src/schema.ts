@@ -1883,3 +1883,227 @@ export const shares = pgTable(
 
 export type ShareRow = typeof shares.$inferSelect;
 export type NewShareRow = typeof shares.$inferInsert;
+
+/**
+ * People (Digital Humans) — context 4 (Stage 2.16, D2.16-1..8).
+ *
+ * The DM section 10 chain: Digital Human → Character → Persona → AI Creator
+ * → Public Profile. FIVE DISTINCT entities; none implies the next
+ * (invariant 11). Chain-only foundation per D2.16-1 — voices/wardrobes are
+ * deferred. Every aggregate is org-scoped; chain FKs are intra-People
+ * RESTRICT; cross-context refs (base model/workflow versions) stay LOOSE by
+ * design (no cross-context foreign keys, house rule).
+ *
+ * DIGITAL HUMAN — the underlying synthetic person (appearance/identity core).
+ * Mutable Control-authored aggregate; lifecycle draft→active→retired.
+ */
+export const digitalHumans = pgTable(
+  "digital_humans",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    /** Opaque asset-version appearance refs — metadata only, never binaries. */
+    appearanceRefs: jsonb("appearance_refs").$type<string[]>().notNull().default([]),
+    /** Loose catalog version refs (versions are immutable; no cross-context FK). */
+    baseModelVersionRef: uuid("base_model_version_ref"),
+    baseWorkflowVersionRef: uuid("base_workflow_version_ref"),
+    status: text("status").notNull().default("draft"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("digital_humans_status_check", sql`${t.status} in ('draft', 'active', 'retired')`),
+    index("idx_digital_humans_org_status").on(t.orgId, t.status),
+  ],
+).enableRLS();
+
+export type DigitalHumanRow = typeof digitalHumans.$inferSelect;
+export type NewDigitalHumanRow = typeof digitalHumans.$inferInsert;
+
+/**
+ * People (Stage 2.16).
+ *
+ * CHARACTER — a role/identity a digital human portrays. digitalHumanId is
+ * NULLABLE (characters can exist uncast, DM section 10). Mutable;
+ * draft→active→retired.
+ */
+export const characters = pgTable(
+  "characters",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    digitalHumanId: uuid("digital_human_id").references((): AnyPgColumn => digitalHumans.id, {
+      onDelete: "restrict",
+    }),
+    name: text("name").notNull(),
+    bio: text("bio"),
+    visualRefs: jsonb("visual_refs").$type<string[]>().notNull().default([]),
+    status: text("status").notNull().default("draft"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("characters_status_check", sql`${t.status} in ('draft', 'active', 'retired')`),
+    index("idx_characters_org_status").on(t.orgId, t.status),
+    index("idx_characters_digital_human").on(t.digitalHumanId),
+  ],
+).enableRLS();
+
+export type CharacterRow = typeof characters.$inferSelect;
+export type NewCharacterRow = typeof characters.$inferInsert;
+
+/**
+ * People (Stage 2.16).
+ *
+ * PERSONA — the personality/behavior layer ABOVE a character. The chain
+ * requires the character to exist (NOT NULL FK). Mutable;
+ * draft→active→retired.
+ */
+export const personas = pgTable(
+  "personas",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    characterId: uuid("character_id")
+      .notNull()
+      .references((): AnyPgColumn => characters.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    personality: text("personality"),
+    interests: jsonb("interests").$type<string[]>().notNull().default([]),
+    capabilities: jsonb("capabilities").$type<string[]>().notNull().default([]),
+    languages: jsonb("languages").$type<string[]>().notNull().default([]),
+    behaviorConfig: jsonb("behavior_config").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status").notNull().default("draft"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("personas_status_check", sql`${t.status} in ('draft', 'active', 'retired')`),
+    index("idx_personas_org_status").on(t.orgId, t.status),
+    index("idx_personas_character").on(t.characterId),
+  ],
+).enableRLS();
+
+export type PersonaRow = typeof personas.$inferSelect;
+export type NewPersonaRow = typeof personas.$inferInsert;
+
+/**
+ * People (Stage 2.16).
+ *
+ * AI CREATOR — the operational entertainer entity the Control Room operates:
+ * a persona packaged with production/communication capability. Mutable;
+ * draft→active⇄paused→retired. Handle is unique per org. `isAi` is the
+ * always-true disclosure flag (DM section 10).
+ */
+export const aiCreators = pgTable(
+  "ai_creators",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    personaId: uuid("persona_id")
+      .notNull()
+      .references((): AnyPgColumn => personas.id, { onDelete: "restrict" }),
+    handle: text("handle").notNull(),
+    displayName: text("display_name").notNull(),
+    capabilities: jsonb("capabilities").$type<string[]>().notNull().default([]),
+    contentCategories: jsonb("content_categories").$type<string[]>().notNull().default([]),
+    communicationConfig: jsonb("communication_config")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    /** Always-true AI disclosure (DM section 10); CHECK-enforced below. */
+    isAi: boolean("is_ai").notNull().default(true),
+    status: text("status").notNull().default("draft"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("ai_creators_status_check", sql`${t.status} in ('draft', 'active', 'paused', 'retired')`),
+    check("ai_creators_handle_shape_check", sql`${t.handle} ~ '^[a-z0-9-]{3,64}$'`),
+    check("ai_creators_is_ai_check", sql`${t.isAi} = true`),
+    unique("ai_creators_org_handle_unique").on(t.orgId, t.handle),
+    index("idx_ai_creators_org_status").on(t.orgId, t.status),
+    index("idx_ai_creators_persona").on(t.personaId),
+  ],
+).enableRLS();
+
+export type AiCreatorRow = typeof aiCreators.$inferSelect;
+export type NewAiCreatorRow = typeof aiCreators.$inferInsert;
+
+/**
+ * People (Stage 2.16).
+ *
+ * PUBLIC PROFILE — the PUBLICATION-FACING identity of an AI creator.
+ * CRITICAL (D2.16-3): snapshot rows are authored ONLY through the
+ * publication flow (publishing → people mediated API, same-transaction
+ * discipline per consumer) — there is NO arbitrary profile edit path.
+ * Snapshots form an append-only family keyed by publication_version_id
+ * (idempotency + provenance); a republish retires the previous current row
+ * to 'unpublished' and activates the new one; historical rows persist.
+ * Status has no 'draft' — a profile exists only after a real publication.
+ */
+export const creatorProfiles = pgTable(
+  "creator_profiles",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    aiCreatorId: uuid("ai_creator_id")
+      .notNull()
+      .references((): AnyPgColumn => aiCreators.id, { onDelete: "restrict" }),
+    /** Provenance: the publication family that authored this snapshot. */
+    publicationId: uuid("publication_id")
+      .notNull()
+      .references((): AnyPgColumn => publications.id, { onDelete: "restrict" }),
+    /** Snapshot source version — the IDEMPOTENCY key (one snapshot per version). */
+    publicationVersionId: uuid("publication_version_id")
+      .notNull()
+      .references((): AnyPgColumn => publicationVersions.id, { onDelete: "restrict" }),
+    handle: text("handle").notNull(),
+    displayName: text("display_name").notNull(),
+    bio: text("bio"),
+    personalitySnapshot: jsonb("personality_snapshot").$type<Record<string, unknown>>().notNull().default({}),
+    interestsSnapshot: jsonb("interests_snapshot").$type<string[]>().notNull().default([]),
+    /** Opaque asset-version refs — never storage paths/URLs. */
+    avatarRef: uuid("avatar_ref"),
+    posterRef: uuid("poster_ref"),
+    /** True only if the AI creator's communication config allows messaging. */
+    messagingEnabled: boolean("messaging_enabled").notNull().default(false),
+    status: text("status").notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("creator_profiles_status_check", sql`${t.status} in ('active', 'paused', 'unpublished')`),
+    check("creator_profiles_handle_shape_check", sql`${t.handle} ~ '^[a-z0-9-]{3,64}$'`),
+    /**
+     * One CURRENT profile per (org, creator) and per (org, handle) — partial
+     * uniques over the live statuses only. Historical snapshots (status =
+     * 'unpublished') are RETAINED (D2.16-3: never hard-deleted) and must not
+     * hold the slot that the next publication's snapshot row needs.
+     */
+    uniqueIndex("creator_profiles_org_creator_unique")
+      .on(t.orgId, t.aiCreatorId)
+      .where(sql`status <> 'unpublished'`),
+    uniqueIndex("creator_profiles_org_handle_unique")
+      .on(t.orgId, t.handle)
+      .where(sql`status <> 'unpublished'`),
+    /** Snapshot-family idempotency: one profile row per publication version, ever. */
+    unique("creator_profiles_publication_version_unique").on(t.publicationVersionId),
+    index("idx_creator_profiles_org_status").on(t.orgId, t.status),
+    index("idx_creator_profiles_ai_creator").on(t.aiCreatorId),
+  ],
+).enableRLS();
+
+export type CreatorProfileRow = typeof creatorProfiles.$inferSelect;
+export type NewCreatorProfileRow = typeof creatorProfiles.$inferInsert;

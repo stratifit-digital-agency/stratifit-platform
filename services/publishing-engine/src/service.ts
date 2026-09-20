@@ -62,8 +62,8 @@ export interface PublishingServiceDeps {
    * resolves to null (IDOR-safe).
    */
   resolveSubject: (orgId: string, subjectKind: string, subjectRef: string) => Promise<
-    | { readonly kind: "production" | "asset_version"; readonly orgId: string }
-    | { readonly kind: "ai_creator_profile" | "campaign_creative"; readonly unsupported: true }
+    | { readonly kind: "production" | "asset_version" | "ai_creator_profile"; readonly orgId: string }
+    | { readonly kind: "campaign_creative"; readonly unsupported: true }
     | null
   >;
   /**

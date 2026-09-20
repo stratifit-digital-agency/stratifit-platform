@@ -20,6 +20,15 @@ export const ControlCapability = [
   "lead.assign",
   "admin.permissions",
   "audit.read",
+  // Stage 2.16 (People foundation, D2.16-4): dedicated people.* capability
+  // family — People authoring is NOT reused production.publish. Two
+  // domain-oriented capabilities:
+  //   people.manage — Control-only authoring + lifecycle of the chain
+  //     (digital humans, characters, personas, AI creators). Profile
+  //     snapshots are NOT authorable here (D2.16-3: publication-authored).
+  //   people.read   — organization-scoped read of People chain state.
+  "people.manage",
+  "people.read",
 ] as const;
 
 export type ControlCapability = (typeof ControlCapability)[number];
@@ -36,9 +45,11 @@ const ROLE_CAPABILITIES: Record<OperatorRole, readonly ControlCapability[]> = {
     "messaging.takeover",
     "lead.assign",
     "audit.read",
+    "people.manage",
+    "people.read",
   ],
-  reviewer: ["production.approve", "audit.read"],
-  viewer: ["audit.read"],
+  reviewer: ["production.approve", "audit.read", "people.read"],
+  viewer: ["audit.read", "people.read"],
 };
 
 export const capabilitiesFor = (roles: readonly OperatorRole[]): readonly ControlCapability[] => {

@@ -17,6 +17,9 @@ import { principalOf, type SocialWriteOutcome } from "./social";
  */
 export const uuid = z.string().uuid();
 
+/** D2.16-8: creator handle shape — mirrors the DB CHECK ^[a-z0-9-]{3,64}$. */
+export const handleShape = z.string().regex(/^[a-z0-9-]{3,64}$/);
+
 export const errorEnvelope = (code: string, status: number, message: string, fieldErrors?: unknown) =>
   NextResponse.json(
     { error: { code, message, ...(fieldErrors ? { fieldErrors } : {}) } },
@@ -57,7 +60,13 @@ export const writeResponse = (outcome: SocialWriteOutcome, successStatus = 200) 
 export const toggleBodySchema = z.object({ contentRef: uuid }).strict();
 
 /** Strict follow body. */
-export const followBodySchema = z.object({ followeeRef: uuid }).strict();
+/** D2.16-5: optional kind selector — audience_user (default) | creator_profile. */
+export const followBodySchema = z
+  .object({
+    followeeRef: uuid,
+    followeeKind: z.enum(["audience_user", "creator_profile"]).optional(),
+  })
+  .strict();
 
 /** Strict comment body. */
 export const commentBodySchema = z
