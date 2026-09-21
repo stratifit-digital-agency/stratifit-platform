@@ -303,6 +303,18 @@ Explicit, first-class, and blocking: generation/publication must be blockable wh
 required rights are invalid (invariant 2). The rights *engine* is future work; the
 *model* is here.
 
+> **Stage 2.21 implementation status:** the model is DURABLE —
+> `services/rights` owns `rights_owners` / `rights_grants` /
+> `rights_status_events` (immutable history-of-record; no `rights.*` bus
+> events). V1 subject kinds are `digital_human|character|persona|asset|
+> production` (`voice` EXCLUDED pending Open Question 1). Grant CORE fields are
+> immutable through the service API (status transitions only, no deletes);
+> lifecycle is `draft → active → suspended ⇄ active → revoked/expired` with
+> revoked/expired terminal; validity windows are evaluated LAZILY at use time
+> by the exported fail-closed `evaluateUse` seam. Ports remain UNWIRED
+> (D2.21-2): the production gate, publishing approval, People authoring, and QC
+> still treat absent rights as a vacuous pass until a future cutover stage.
+
 ### Rights Owner
 A person or entity that can grant usage rights (an individual, a likeness owner, a
 licensor). Fields: internal ID, kind (individual | organization), display name,

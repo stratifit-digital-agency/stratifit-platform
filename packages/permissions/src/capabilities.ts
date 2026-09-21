@@ -37,6 +37,15 @@ export const ControlCapability = [
   //   creative.read   — organization-scoped read of Creative state.
   "creative.manage",
   "creative.read",
+  // Stage 2.21 (Rights & Consent foundation, D2.21-4): dedicated rights.*
+  // capability family — consent authoring is NOT reused production.*/
+  // creative.*. Ports stay UNWIRED in this stage (D2.21-2): these
+  // capabilities gate Control CRUD + evaluation reads only.
+  //   rights.manage — Control-only authoring + lifecycle of owners and
+  //     grants (grants' core fields immutable; status transitions only).
+  //   rights.read   — organization-scoped read incl. status-event history.
+  "rights.manage",
+  "rights.read",
 ] as const;
 
 export type ControlCapability = (typeof ControlCapability)[number];
@@ -57,9 +66,11 @@ const ROLE_CAPABILITIES: Record<OperatorRole, readonly ControlCapability[]> = {
     "people.read",
     "creative.manage",
     "creative.read",
+    "rights.manage",
+    "rights.read",
   ],
-  reviewer: ["production.approve", "audit.read", "people.read", "creative.read"],
-  viewer: ["audit.read", "people.read", "creative.read"],
+  reviewer: ["production.approve", "audit.read", "people.read", "creative.read", "rights.read"],
+  viewer: ["audit.read", "people.read", "creative.read", "rights.read"],
 };
 
 export const capabilitiesFor = (roles: readonly OperatorRole[]): readonly ControlCapability[] => {

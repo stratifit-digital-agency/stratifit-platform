@@ -272,6 +272,21 @@ Public-safe + audience-private surface, rooted at `/api/media/*`:
 > audit actions (D2.20-8). NO Media surface exists; scripts and the
 > world-building catalog remain deferred (D2.20-2/D2.20-3); no creative events
 > (D2.20-4).
+> **Stage 2.21 route note:** the Rights & Consent foundation is CONTROL-ONLY
+> (D2.21-2: ports UNWIRED; evaluation seam exported but not consumed by any
+> approval/authoring flow) — implemented at `/api/control/rights/owners`
+> (GET list + POST create), `/api/control/rights/owners/[id]/status`
+> (PATCH verification lifecycle), `/api/control/rights/grants` (GET list +
+> POST create), `/api/control/rights/grants/[id]/status` (PATCH D2.21-5
+> lifecycle), `/api/control/rights/grants/[id]` (GET detail incl. the
+> immutable status-event history), and `/api/control/rights/status-events?
+> grantId=` (GET history) with the dedicated `rights.manage` (admin+operator) /
+> `rights.read` (all four roles) capability family (D2.21-4), strict Zod,
+> §13 error envelope, server-derived org/operator authority, in-transaction
+> owner/subject integrity (same-org, fail-closed `not_found`), and the four
+> same-transaction audit actions (D2.21-8). NO Media surface; no `rights.*`
+> events (D2.21-3 — `rights_status_events` is the history of record).
+
 | Family | Routes (representative) | Command/Query | Auth state | Backed by |
 |---|---|---|---|---|
 | **Content reads** | `GET /api/media/content` (home / discover / trending / recommendations via mode), `GET /api/media/content/[slug]` | Query | anonymous | publishing + audience public read models; slugs only, never internal production IDs |
@@ -306,7 +321,8 @@ domain commands; they do NOT expose infrastructure primitives directly.**
 | **Plans / Gates / Manifests** | plan versions, gate evaluation requests, manifest reads | production-engine | plan/approve |
 | **Templates** | create/version templates | production-engine | `production.plan` |
 | **Creative** | universes, worlds, stories, seasons, episodes, scenes, shots, scripts, narrative catalog | creative | `production.plan` |
-| **People** | digital humans, characters, personas, AI creators, voices, wardrobe, locations | people | `production.plan` || **Rights** | owners, grants, revocations, evaluations | rights | `production.plan` |
+| **People** | digital humans, characters, personas, AI creators, voices, wardrobe, locations | people | `people.manage` / `people.read` |
+| **Rights** | owners, grants, status transitions, evaluations | rights | `rights.manage` / `rights.read` |
 | **Assets** | register, version, approve, derivatives | assets | `production.plan` |
 | **Generations** | request generation, read provenance | generation | `generation.request` |
 | **Models** | registry CRUD + versions | packages/ai (durable rows) | `model.manage` |

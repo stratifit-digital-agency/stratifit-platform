@@ -64,6 +64,30 @@ describe("operator capability matrix", () => {
     });
   });
 
+  // Stage 2.21 (D2.21-4): dedicated rights.* family — consent authoring is
+  // never reused production.*/creative.*; read is separated from manage.
+  describe("rights.* capability family (Stage 2.21, D2.21-4)", () => {
+    it("grants rights.manage to admin and operator only", () => {
+      expect(hasCapability(["admin"], "rights.manage")).toBe(true);
+      expect(hasCapability(["operator"], "rights.manage")).toBe(true);
+      expect(hasCapability(["reviewer"], "rights.manage")).toBe(false);
+      expect(hasCapability(["viewer"], "rights.manage")).toBe(false);
+    });
+
+    it("grants rights.read to every Control role", () => {
+      for (const role of ["admin", "operator", "reviewer", "viewer"] as const) {
+        expect(hasCapability([role], "rights.read")).toBe(true);
+      }
+    });
+
+    it("never derives rights.* from production.*/creative.*", () => {
+      expect(hasCapability(["operator"], "production.publish")).toBe(true);
+      expect(hasCapability(["operator"], "rights.manage")).toBe(true);
+      expect(hasCapability(["reviewer"], "rights.manage")).toBe(false);
+      expect(hasCapability(["viewer"], "rights.manage")).toBe(false);
+    });
+  });
+
   // Stage 2.16 (D2.16-4): dedicated people.* family — People authoring is
   // never reused production.publish, and read is separated from manage.
   describe("people.* capability family (Stage 2.16, D2.16-4)", () => {

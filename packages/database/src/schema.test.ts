@@ -13,6 +13,12 @@ import {
   episodes,
   scenes,
   shots,
+  rightsOwners,
+  rightsGrants,
+  rightsStatusEvents,
+  RIGHTS_SUBJECT_KINDS,
+  RIGHTS_SCOPES,
+  RIGHTS_PLATFORMS,
   assetLineage,
   assetVersions,
   assets,
@@ -94,7 +100,10 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         k !== "QC_ISSUE_RESOLUTIONS" &&
         k !== "CONVERSATION_STATUSES" &&
         k !== "LEAD_STATUSES" &&
-        k !== "CREATIVE_STORY_KINDS",
+        k !== "CREATIVE_STORY_KINDS" &&
+        k !== "RIGHTS_SUBJECT_KINDS" &&
+        k !== "RIGHTS_SCOPES" &&
+        k !== "RIGHTS_PLATFORMS",
     );
     expect(exported.sort()).toEqual(
       [
@@ -169,6 +178,11 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         "episodes",
         "scenes",
         "shots",
+        // Stage 2.21 (Rights & Consent): owners → grants → immutable status
+        // events (voice subject kind excluded pending DM OQ1, D2.21-1).
+        "rightsOwners",
+        "rightsGrants",
+        "rightsStatusEvents",
       ].sort(),
     );
   });
@@ -441,6 +455,12 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   episodes: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   scenes: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   shots: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  // Stage 2.21 (Rights & Consent Foundation, D2.21-7): owners + grants are
+  // mutable ARWD (grant CORE immutability is service-enforced, D2.21-6); the
+  // status-event history is the IMMUTABLE INSERT+SELECT family (D2.21-3).
+  rights_owners: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  rights_grants: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  rights_status_events: ["INSERT", "SELECT"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -1328,5 +1348,53 @@ describe("creative hierarchy (Stage 2.20, D2.20-1..D2.20-9)", () => {
     }
     expect(ddl42).not.toMatch(/TO PUBLIC/);
     // D2.20-4: no creative events — contracts untouched is proven in contracts.test.ts (36).
+  });
+});
+
+// =============================================================================
+// Stage 2.21 - Rights & Consent Foundation (D2.21-1..D2.21-8)
+// =============================================================================
+describe("rights family (Stage 2.21, D2.21-1..D2.21-8)", () => {
+  it("frozen shape: owners/grants mutable ARWD, status events immutable, subject-kind CHECK excludes voice, platform allowlist, validity-window CHECK, RLS, grants", () => {
+    const cols = {
+      owners: getTableColumns(rightsOwners),
+      grants: getTableColumns(rightsGrants),
+      events: getTableColumns(rightsStatusEvents),
+    };
+    expect(Object.keys(cols.owners).sort()).toEqual(
+      ["contactRef", "createdAt", "displayName", "id", "kind", "orgId", "updatedAt", "verificationStatus"].sort(),
+    );
+    expect(Object.keys(cols.grants).sort()).toEqual(
+      ["createdAt", "evidenceRefs", "expiresAt", "grantedBy", "id", "orgId", "ownerId", "platforms", "scope", "startsAt", "status", "subjectId", "subjectKind", "territories", "updatedAt"].sort(),
+    );
+    expect(Object.keys(cols.events).sort()).toEqual(
+      ["actorId", "createdAt", "fromStatus", "grantId", "id", "orgId", "reason", "toStatus"].sort(),
+    );
+    // D2.21-1: voice EXCLUDED from the frozen subject-kind family.
+    expect([...RIGHTS_SUBJECT_KINDS]).toEqual(["digital_human", "character", "persona", "asset", "production"]);
+    expect([...RIGHTS_SCOPES]).toEqual(["generation", "publication", "advertising", "messaging", "derivative_creation"]);
+    expect([...RIGHTS_PLATFORMS]).toEqual(["stratifit_media", "youtube", "tiktok", "instagram", "facebook", "all"]);
+    const ddl43 = readFileSync(fileURLToPath(new URL("../drizzle/0043_flaky_mother_askani.sql", import.meta.url)), "utf8");
+    const mustContain = [
+      "in ('digital_human', 'character', 'persona', 'asset', 'production')",
+      "in ('generation', 'publication', 'advertising', 'messaging', 'derivative_creation')",
+      "in ('draft', 'active', 'expired', 'revoked', 'suspended')",
+      "in ('unverified', 'pending', 'verified', 'rejected')",
+      "array['stratifit_media', 'youtube', 'tiktok', 'instagram', 'facebook', 'all']::text[]",
+      '"rights_grants"."expires_at" > "rights_grants"."starts_at"',
+      'REFERENCES "public"."organizations"("id") ON DELETE restrict',
+      'REFERENCES "public"."rights_owners"("id") ON DELETE restrict',
+      'REFERENCES "public"."rights_grants"("id") ON DELETE restrict',
+      "ENABLE ROW LEVEL SECURITY",
+    ];
+    for (const fragment of mustContain) expect(ddl43).toContain(fragment);
+    const ddl44 = readFileSync(fileURLToPath(new URL("../drizzle/0044_rights_grants_policies.sql", import.meta.url)), "utf8");
+    expect(ddl44).toContain("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.rights_owners TO stratifit_runtime");
+    expect(ddl44).toContain("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.rights_grants TO stratifit_runtime");
+    expect(ddl44).toContain("GRANT SELECT, INSERT ON TABLE public.rights_status_events TO stratifit_runtime");
+    for (const tbl of ["rights_owners", "rights_grants", "rights_status_events"]) {
+      expect(ddl44).toContain(`CREATE POLICY "runtime_all" ON public.${tbl}`);
+    }
+    expect(ddl44).not.toMatch(/TO PUBLIC/);
   });
 });

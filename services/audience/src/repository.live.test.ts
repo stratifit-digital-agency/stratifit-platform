@@ -120,7 +120,7 @@ const provisionPublishedPublication = async (slugTag: string) => {
 d("audience live proofs (runtime role)", () => {
   it("runtime grants map = 54 distinct tables (53 + the Stage 2.19 analytics_events intake family) with public_content + watch_progress ARWD", { timeout: 30_000 }, async () => {
     const [counts] = await runtimeSql!`select count(distinct table_name)::int as n from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_schema = 'public'`;
-    expect(counts!.n).toBe(61);
+    expect(counts!.n).toBe(64);
     const [pc] = await runtimeSql!`select string_agg(privilege_type, ',' order by privilege_type) as privs from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_name = 'public_content' and table_schema = 'public'`;
     expect(pc!.privs).toBe("DELETE,INSERT,SELECT,UPDATE");
     const [wp] = await runtimeSql!`select string_agg(privilege_type, ',' order by privilege_type) as privs from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_name = 'watch_progress' and table_schema = 'public'`;

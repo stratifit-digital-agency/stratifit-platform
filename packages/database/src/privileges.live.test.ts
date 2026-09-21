@@ -73,8 +73,8 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "service_leads",
     // Stage 2.18 (in-app Notifications): mutable audience-owner aggregate.
     "notifications",
-    // Stage 2.20 (Creative / Story Foundation): seven mutable hierarchy
-    // aggregates — D2.20-9 ARWD families.
+    // Stage 2.20 (Creative): seven mutable hierarchy aggregates — D2.20-9
+    // ARWD families.
     "universes",
     "worlds",
     "stories",
@@ -82,11 +82,15 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "episodes",
     "scenes",
     "shots",
+    // Stage 2.21 (Rights & Consent Foundation): mutable owners + grants
+    // (D2.21-7 ARWD; core immutability service-enforced).
+    "rights_owners",
+    "rights_grants",
   ] as const;
 
   // Immutable families (D2.6-4 / D2.7-4 / Stage 2.8 catalog versions /
-  // Stage 2.9 completion provenance / Stage 2.11 QC evidence): INSERT +
-  // SELECT, never UPDATE/DELETE.
+  // Stage 2.9 completion provenance / Stage 2.11 QC evidence / Stage 2.21
+  // rights status-event history): INSERT + SELECT, never UPDATE/DELETE.
   const immutableTables = [
     "production_plan_versions",
     "gate_decision_records",
@@ -106,6 +110,9 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "lead_follow_ups",
     // Stage 2.19 (Analytics Intake): immutable public-beacon family.
     "analytics_events",
+    // Stage 2.21 (Rights & Consent): status-event history of record
+    // (D2.21-3: no rights.* events; immutable INSERT+SELECT family).
+    "rights_status_events",
   ] as const;
 
   it("grants stratifit_runtime INSERT+SELECT only on the immutable families", async () => {

@@ -26,6 +26,7 @@
     "@stratifit/messaging": "workspace:*",
     "@stratifit/people": "workspace:*",
     "@stratifit/creative": "workspace:*",
+    "@stratifit/rights": "workspace:*",
     "@stratifit/permissions": "workspace:*",
     "@stratifit/production-engine": "workspace:*",
     "@stratifit/publishing-engine": "workspace:*",

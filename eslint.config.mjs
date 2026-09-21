@@ -69,6 +69,10 @@ const elementTypes = [
   // CONTROL-ONLY context: no Media surface exists or is permitted; the only
   // consumer is the Control app (creative.manage/creative.read).
   { type: "public-service", pattern: "services/creative/**", mode: "full" },
+  // Stage 2.21 (D2.21-2): rights owns the owners/grants/status-events family
+  // and the fail-closed evaluation seam. CONTROL-ONLY context: no Media
+  // surface; ports remain UNWIRED (cutover is a future authorized stage).
+  { type: "public-service", pattern: "services/rights/**", mode: "full" },
   { type: "control-app", pattern: "apps/stratifit-control/**", mode: "full" },
   { type: "media-app", pattern: "apps/stratifit-media/**", mode: "full" },
 ];

@@ -2696,3 +2696,142 @@ export const shots = pgTable(
 
 export type ShotRow = typeof shots.$inferSelect;
 export type NewShotRow = typeof shots.$inferInsert;
+
+/**
+ * Rights & Consent (Stage 2.21, D2.21-1..D2.21-8).
+ *
+ * Three-table family (DM section 11, bounded context 5):
+ *
+ *   rights_owners → rights_grants → rights_status_events (immutable history)
+ *
+ * HARD BOUNDARIES (frozen):
+ *  - D2.21-1: v1 subject kinds are EXACTLY digital_human|character|persona|
+ *    asset|production — `voice` is EXCLUDED pending DM Open Question 1.
+ *  - D2.21-2: the Publishing/People rights ports remain UNWIRED — this stage
+ *    is additive-only (adapters + evaluation seam built, zero behavior change
+ *    in Production gates / Publishing approval / People authoring / QC).
+ *  - D2.21-3: NO rights.* events — rights_status_events is the history of
+ *    record (IMMUTABLE INSERT+SELECT family); taxonomy stays 36.
+ *  - D2.21-5: grant lifecycle draft → active → (suspended ⇄ active) →
+ *    revoked|expired; revoked/expired terminal; evaluation is LAZY (time
+ *    windows evaluated at use time) — no worker-driven expiry.
+ *  - D2.21-6: grant CORE fields are immutable through the service API —
+ *    only status transitions mutate rows; grants are never deleted.
+ *
+ * Conventions: org-scoped (org_id FK RESTRICT), in-transaction subject/owner
+ * integrity at the service layer (same-org, fail-closed not_found — People/
+ * Creative precedent), mutable ARWD family for owners/grants in 0044.
+ */
+export const RIGHTS_SUBJECT_KINDS = ["digital_human", "character", "persona", "asset", "production"] as const;
+export const RIGHTS_SCOPES = ["generation", "publication", "advertising", "messaging", "derivative_creation"] as const;
+export const RIGHTS_PLATFORMS = ["stratifit_media", "youtube", "tiktok", "instagram", "facebook", "all"] as const;
+
+export const rightsOwners = pgTable(
+  "rights_owners",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    kind: text("kind").notNull(),
+    displayName: text("display_name").notNull(),
+    contactRef: text("contact_ref"),
+    verificationStatus: text("verification_status").notNull().default("unverified"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("rights_owners_kind_check", sql`${t.kind} in ('individual', 'organization')`),
+    check(
+      "rights_owners_verification_check",
+      sql`${t.verificationStatus} in ('unverified', 'pending', 'verified', 'rejected')`,
+    ),
+    check("rights_owners_name_length_check", sql`char_length(${t.displayName}) between 1 and 200`),
+    index("idx_rights_owners_org").on(t.orgId, t.verificationStatus),
+  ],
+).enableRLS();
+
+export type RightsOwnerRow = typeof rightsOwners.$inferSelect;
+export type NewRightsOwnerRow = typeof rightsOwners.$inferInsert;
+
+export const rightsGrants = pgTable(
+  "rights_grants",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    ownerId: uuid("owner_id")
+      .notNull()
+      .references((): AnyPgColumn => rightsOwners.id, { onDelete: "restrict" }),
+    subjectKind: text("subject_kind").notNull(),
+    subjectId: uuid("subject_id").notNull(),
+    scope: text("scope").notNull(),
+    platforms: text("platforms").array().notNull(),
+    territories: text("territories").array().notNull(),
+    startsAt: timestamp("starts_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    status: text("status").notNull().default("draft"),
+    grantedBy: uuid("granted_by").notNull(),
+    evidenceRefs: text("evidence_refs").array().notNull().default(sql`'{}'::text[]`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "rights_grants_subject_kind_check",
+      sql`${t.subjectKind} in ('digital_human', 'character', 'persona', 'asset', 'production')`,
+    ),
+    check(
+      "rights_grants_scope_check",
+      sql`${t.scope} in ('generation', 'publication', 'advertising', 'messaging', 'derivative_creation')`,
+    ),
+    check(
+      "rights_grants_status_check",
+      sql`${t.status} in ('draft', 'active', 'expired', 'revoked', 'suspended')`,
+    ),
+    check(
+      "rights_grants_platforms_check",
+      sql`${t.platforms} <@ array['stratifit_media', 'youtube', 'tiktok', 'instagram', 'facebook', 'all']::text[] and cardinality(${t.platforms}) between 1 and 6`,
+    ),
+    check("rights_grants_territories_check", sql`cardinality(${t.territories}) between 1 and 50`),
+    check(
+      "rights_grants_validity_window_check",
+      sql`${t.expiresAt} is null or ${t.startsAt} is null or ${t.expiresAt} > ${t.startsAt}`,
+    ),
+    index("idx_rights_grants_subject").on(t.orgId, t.subjectKind, t.subjectId, t.scope),
+    index("idx_rights_grants_owner").on(t.ownerId),
+  ],
+).enableRLS();
+
+export type RightsGrantRow = typeof rightsGrants.$inferSelect;
+export type NewRightsGrantRow = typeof rightsGrants.$inferInsert;
+
+export const rightsStatusEvents = pgTable(
+  "rights_status_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    grantId: uuid("grant_id")
+      .notNull()
+      .references((): AnyPgColumn => rightsGrants.id, { onDelete: "restrict" }),
+    fromStatus: text("from_status").notNull(),
+    toStatus: text("to_status").notNull(),
+    reason: text("reason"),
+    actorId: uuid("actor_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "rights_status_events_status_check",
+      sql`${t.fromStatus} in ('draft', 'active', 'expired', 'revoked', 'suspended') and ${t.toStatus} in ('draft', 'active', 'expired', 'revoked', 'suspended')`,
+    ),
+    index("idx_rights_status_events_grant").on(t.grantId, t.createdAt),
+    index("idx_rights_status_events_org").on(t.orgId),
+  ],
+).enableRLS();
+
+export type RightsStatusEventRow = typeof rightsStatusEvents.$inferSelect;
+export type NewRightsStatusEventRow = typeof rightsStatusEvents.$inferInsert;

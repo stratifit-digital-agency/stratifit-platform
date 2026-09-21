@@ -98,7 +98,7 @@ d("analytics intake live proofs (runtime role)", () => {
 
   it("runtime grants map = 54 distinct tables with analytics_events INSERT+SELECT only", { timeout: 30_000 }, async () => {
     const [counts] = await runtimeSql!`select count(distinct table_name)::int as n from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_schema = 'public'`;
-    expect(counts!.n).toBe(61);
+    expect(counts!.n).toBe(64);
     const [ae] = await runtimeSql!`select string_agg(privilege_type, ',' order by privilege_type) as privs from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_name = 'analytics_events' and table_schema = 'public'`;
     expect(ae!.privs).toBe("INSERT,SELECT");
   });

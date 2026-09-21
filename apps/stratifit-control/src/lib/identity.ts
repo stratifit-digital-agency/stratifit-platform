@@ -67,6 +67,11 @@ import {
   createDrizzleCreativeRepository,
   type CreativeService,
 } from "@stratifit/creative";
+import {
+  createRightsService,
+  createDrizzleRightsRepository,
+  type RightsService,
+} from "@stratifit/rights";
 import { InProcessEventPublisher, idempotent } from "@stratifit/events";
 import type { DomainEventEnvelope } from "@stratifit/contracts";
 import { createDatabase } from "@stratifit/database";
@@ -108,6 +113,7 @@ let services: {
   people: PeopleService;
   messaging: MessagingService;
   creative: CreativeService;
+  rights: RightsService;
 } | null = null;
 
 const buildServices = () => {
@@ -794,6 +800,30 @@ const buildServices = () => {
           },
         }),
       }),
+      // Stage 2.21: the Rights & Consent service shares the SAME Drizzle pool
+      // and the SAME audit transaction writer (D2.4-1 reused): a Rights
+      // mutation, its immutable status-event row, and its audit record commit
+      // in the SAME transaction. NO event publisher — Rights emits nothing
+      // (D2.21-3; taxonomy stays 36). Ports remain UNWIRED (D2.21-2): the
+      // Publishing/People seams stay vacuous-pass until a future cutover.
+      rights: createRightsService({
+        repository: createDrizzleRightsRepository({
+          db,
+          auditWriter: {
+            appendWithin: (tx, entry) =>
+              writer.appendWithin(tx as Parameters<typeof writer.appendWithin>[0], {
+                actorId: entry.actorId,
+                action: entry.action,
+                subjectKind: entry.targetType,
+                subjectId: entry.targetId,
+                organizationId: entry.organizationId ?? null,
+                correlationId: entry.correlationId ?? null,
+                causationId: entry.causationId ?? null,
+                payload: entry.metadata ?? {},
+              }),
+          },
+        }),
+      }),
       membership: createMembershipService({
         repository: membershipRepo,
         // D2.4-1: transaction path is primary; this fallback seam is unused
@@ -851,6 +881,9 @@ export const getMessagingService = (): MessagingService => buildServices().messa
 
 /** Exposed for the Stage 2.20 /api/control/creative routes (D2.20-5/D2.20-7). */
 export const getCreativeService = (): CreativeService => buildServices().creative;
+
+/** Exposed for the Stage 2.21 /api/control/rights routes (D2.21-4). */
+export const getRightsService = (): RightsService => buildServices().rights;
 
 /** Resolve the current operator server-side; null when anonymous/unprovisioned. */
 export const resolveControlOperator = async (): Promise<ControlOperatorContext | null> => {

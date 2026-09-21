@@ -4,7 +4,7 @@
  * Runs only when the git-ignored root .env provides both database URLs;
  * proves against the LIVE remote through the RUNTIME role (DATABASE_URL /
  * stratifit_runtime) — the privilege boundary production uses:
- *   - runtime grants map = 61 distinct tables incl. the seven Creative
+ *   - runtime grants map = 64 distinct tables incl. the seven Creative and three Rights
  *     tables (ARWD);
  *   - RLS enabled with exactly the runtime_all policy TO stratifit_runtime;
  *   - hierarchy FKs RESTRICT (23503) + lifecycle CHECKs (23514);
@@ -104,11 +104,11 @@ const svc = () => createCreativeService({ repository: sharedRepo });
 
 d("creative live proofs (runtime role)", () => {
   it(
-    "runtime grants map = 61 distinct tables (54 + the seven Stage 2.20 creative families) with all seven tables ARWD",
+    "runtime grants map = 64 distinct tables (61 + the three Stage 2.21 rights families) with all seven Creative tables ARWD",
     { timeout: 30_000 },
     async () => {
       const [counts] = await runtimeSql!`select count(distinct table_name)::int as n from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_schema = 'public'`;
-      expect(counts!.n).toBe(61);
+      expect(counts!.n).toBe(64);
       for (const table of CREATIVE_TABLES) {
         const [row] = await runtimeSql!`select string_agg(privilege_type, ',' order by privilege_type) as privs from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_name = ${table} and table_schema = 'public'`;
         expect(row!.privs).toBe("DELETE,INSERT,SELECT,UPDATE");
