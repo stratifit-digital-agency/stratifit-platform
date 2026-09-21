@@ -514,9 +514,13 @@ export const createRightsService = (deps: RightsServiceDeps): RightsService => {
     },
 
     // -----------------------------------------------------------------------
-    // Port-compatible requirements evaluation (D2.22-2): the exact shape both
-    // frozen ports consume. UNWIRED in Stage 2.22 — the adapters below are
-    // built + exported but NOT injected into any composition (D2.22-4).
+    // Port-compatible requirements evaluation (D2.22-2 + D2.23-2): the exact
+    // shape both frozen ports consume. Stage 2.23 CUTOVER (D2.23-1): the
+    // publication adapter is now INJECTED into the Publishing composition —
+    // approve + retry gate on this verdict. ONLY `enforce` declarations
+    // participate in gating (D2.23-2); `record_only` rows are observe-only
+    // and NEVER block. Absence of declarations preserves the vacuous pass
+    // EXACTLY (D2.22-2).
     // -----------------------------------------------------------------------
     async evaluateUseAgainstRequirements(
       orgId,
@@ -529,12 +533,15 @@ export const createRightsService = (deps: RightsServiceDeps): RightsService => {
     ): Promise<RequirementsVerdict> {
       // D2.22-2: absence of declarations preserves the vacuous pass EXACTLY.
       const declarations = await repo.findRequirementsBySubject(orgId, subjectKind, subjectId);
-      if (declarations.length === 0) return { declared: false, met: true, reasons: [] };
-      // Declarations present: evaluate each with the existing evaluateUse
-      // semantics (same repo lookups, same fail-closed reasons).
+      // D2.23-2: only ENFORCE declarations gate. record_only rows are
+      // observe-only — they never contribute to `declared`/`met`.
+      const gating = declarations.filter((d) => d.enforcement === "enforce");
+      if (gating.length === 0) return { declared: false, met: true, reasons: [] };
+      // Enforce declarations present: evaluate each with the existing
+      // evaluateUse semantics (same repo lookups, same fail-closed reasons).
       const reasons: string[] = [];
       let met = false;
-      for (const d of declarations) {
+      for (const d of gating) {
         if (d.scope !== scope) {
           reasons.push(`declaration ${d.id} covers scope ${d.scope}, not ${scope}`);
           continue;
@@ -546,7 +553,7 @@ export const createRightsService = (deps: RightsServiceDeps): RightsService => {
         }
         reasons.push(...evaluation.reasons.map((r) => `${r.code}: ${r.message}`));
       }
-      // D2.22-2 fail-closed: declared requirements that are not satisfied
+      // D2.23-2 fail-closed: enforce declarations that are not satisfied
       // produce declared=true, met=false with structured reasons.
       return { declared: true, met, reasons };
     },
@@ -561,7 +568,7 @@ export const createRightsService = (deps: RightsServiceDeps): RightsService => {
 
 /** Publishing subject kinds → Rights v1 subject kinds (null = out of v1 scope). */
 export const publicationSubjectToRightsSubject = (
-  subjectKind: "production" | "asset_version" | "ai_creator_profile" | "campaign_creative",
+  subjectKind: string,
 ): RightsSubjectKind | null => {
   switch (subjectKind) {
     case "production":
@@ -572,6 +579,8 @@ export const publicationSubjectToRightsSubject = (
       return null; // NO Rights v1 kind (D2.21-1; DM OQ1 open)
     case "campaign_creative":
       return null; // NO Rights v1 kind (fail-vacuous until OQ6)
+    default:
+      return null; // D2.23-5: unknown/unmapped subjects NEVER invent requirements
   }
 };
 
@@ -590,9 +599,11 @@ export const platformTargetToRightsPlatform = (
 export const createPublicationRightsAdapter = (service: RightsService) =>
   async (
     orgId: string,
-    subjectKind: "production" | "asset_version" | "ai_creator_profile" | "campaign_creative",
+    subjectKind: string,
     subjectRef: string,
   ): Promise<{ readonly declared: boolean; readonly met: boolean; readonly reasons?: readonly string[] }> => {
+    // Accepts the frozen Publishing port's `string` subjectKind; unknown /
+    // unmapped kinds return vacuous (D2.23-5) — never an invented requirement.
     const rightsKind = publicationSubjectToRightsSubject(subjectKind);
     if (rightsKind === null) return { declared: false, met: true }; // out of v1 scope → vacuous
     const verdict = await service.evaluateUseAgainstRequirements(

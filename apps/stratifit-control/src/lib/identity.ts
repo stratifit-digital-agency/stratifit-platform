@@ -70,6 +70,7 @@ import {
 import {
   createRightsService,
   createDrizzleRightsRepository,
+  createPublicationRightsAdapter,
   type RightsService,
 } from "@stratifit/rights";
 import { InProcessEventPublisher, idempotent } from "@stratifit/events";
@@ -407,6 +408,33 @@ const buildServices = () => {
         },
       }),
     });
+    // Stage 2.23 (D2.23-1): the Rights service is built BEFORE the publishing
+    // service so the frozen PublicationRightsPort adapter (D2.22-4) can be
+    // injected as `resolveRights` — the Stage 2.23 PUBLISHING-ONLY CUTOVER.
+    // approve + retry become Rights-gated: `enforce` declarations without a
+    // satisfying active grant block with `rights_requirements_unmet`
+    // (D2.23-2: record_only rows are observe-only and never gate). All other
+    // publication operations and the state machine are unchanged. No new
+    // service dependency: the adapter is a composition-root closure over the
+    // same Rights service below — no service-to-service imports.
+    const rightsService: RightsService = createRightsService({
+      repository: createDrizzleRightsRepository({
+        db,
+        auditWriter: {
+          appendWithin: (tx, entry) =>
+            writer.appendWithin(tx as Parameters<typeof writer.appendWithin>[0], {
+              actorId: entry.actorId,
+              action: entry.action,
+              subjectKind: entry.targetType,
+              subjectId: entry.targetId,
+              organizationId: entry.organizationId ?? null,
+              correlationId: entry.correlationId ?? null,
+              causationId: entry.causationId ?? null,
+              payload: entry.metadata ?? {},
+            }),
+        },
+      }),
+    });
     services = {
       audit: audit,
       production,
@@ -697,6 +725,13 @@ const buildServices = () => {
           return { ...verdict, reviewId: review.id };
         },
         adapters: [new DurableStratifitMediaAdapter()],
+        // Stage 2.23 (D2.23-1): PUBLISHING RIGHTS CUTOVER — the frozen
+        // PublicationRightsPort adapter is now INJECTED. approve + retry gate
+        // on enforce declarations (D2.23-2); every other operation and the
+        // state machine are unchanged. Evaluation inputs are frozen per
+        // D2.23-3/-4/-5 (scope=publication, platform=stratifit_media,
+        // territory=worldwide, at=gate time; unmapped subjects vacuous).
+        resolveRights: createPublicationRightsAdapter(rightsService),
         // Stage 2.13: publishing emits onto the SHARED bus (post-commit).
         publisher: eventBus,
       }),
@@ -804,26 +839,10 @@ const buildServices = () => {
       // and the SAME audit transaction writer (D2.4-1 reused): a Rights
       // mutation, its immutable status-event row, and its audit record commit
       // in the SAME transaction. NO event publisher — Rights emits nothing
-      // (D2.21-3; taxonomy stays 36). Ports remain UNWIRED (D2.21-2): the
-      // Publishing/People seams stay vacuous-pass until a future cutover.
-      rights: createRightsService({
-        repository: createDrizzleRightsRepository({
-          db,
-          auditWriter: {
-            appendWithin: (tx, entry) =>
-              writer.appendWithin(tx as Parameters<typeof writer.appendWithin>[0], {
-                actorId: entry.actorId,
-                action: entry.action,
-                subjectKind: entry.targetType,
-                subjectId: entry.targetId,
-                organizationId: entry.organizationId ?? null,
-                correlationId: entry.correlationId ?? null,
-                causationId: entry.causationId ?? null,
-                payload: entry.metadata ?? {},
-              }),
-          },
-        }),
-      }),
+      // (D2.21-3; taxonomy stays 36). Stage 2.23: the SAME service instance
+      // (built above) feeds the injected PublicationRightsPort adapter —
+      // single instance, no duplicate wiring.
+      rights: rightsService,
       membership: createMembershipService({
         repository: membershipRepo,
         // D2.4-1: transaction path is primary; this fallback seam is unused

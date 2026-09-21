@@ -115,7 +115,7 @@ future in-process libraries created phase by phase as features require them.
 | 2 | Production | `services/production-engine` ✅ | Exists. Per SUGGESTION 1, Planning Engine and Project Management are sub-modules here (they share the production aggregate family: projects, productions, templates, plan versions, gate decisions, manifests). |
 | 3 | Creative / Story | `services/creative` (future) | Universe→World→Story→Season→Episode→Scene→Shot, scripts, narrative catalog, world rules, timelines. Own aggregates 6–7 — deliberately **not** folded into production-engine: DOMAIN_MODEL §7 assigns scenes/shots to their own contexts, referenced by productions. |
 | 4 | People (Digital Humans) | `services/people` (future) | Digital humans, characters, personas, AI creators, public profiles, voices + versions, wardrobes + states (aggregates 8–11). Public-profile *records* are owned here; they are **created/updated only through the publication flow** (publishing → people API), preserving "a public profile is a publication-facing identity." |
-| 5 | Rights & Consent | `services/rights` ✅ | Rights owners, grants, status events, requirements declarations (aggregate 12); fail-closed evaluation seam (Stage 2.21 foundation + Stage 2.22 declaration family; ports UNWIRED — gate/publishing cutover is Stage 2.23; D2.21-2/D2.22-4). |
+| 5 | Rights & Consent | `services/rights` ✅ | Rights owners, grants, status events, requirements declarations (aggregate 12); fail-closed evaluation seam (Stage 2.21 foundation + Stage 2.22 declaration family; ports UNWIRED at 2.21/2.22 — Stage 2.23 Publishing cutover DONE (D2.23-1: `PublicationRightsPort` injected; approve/retry gated on `enforce` requirements only, `record_only` observes, absent declarations vacuous; People cutover deferred to 2.24). |
 | 6 | Asset Domain | `services/assets` (future) | Assets, asset versions, lineage DAG (aggregate 13). Registers generation outputs and media-processing derivatives via its API so lineage edges stay intact. |
 | 7 | Generation | `services/generation` (future) | Generation records + immutable provenance (aggregate 14). Provenance is a **query capability** over generation/asset immutable records (§6), not an owner — no separate provenance module. |
 | 8 | Catalog (Model/Workflow) | `packages/ai` ✅ + `packages/workflows` ✅ | Registries, routers, adapters already exist as shared packages. Their durable rows (`models`, `model_versions`, `workflows`, `workflow_versions`) are owned by the same packages via `packages/database` repositories — keeping vendor-free registry logic and its persistence in one place. |
@@ -165,7 +165,7 @@ All 31 capabilities from the approved plan, each classified:
 | Editorial | Application feature module | `apps/stratifit-control` | Never |
 | Audience | Domain module | `services/audience` (future) | Stage 1 |
 | Social Graph | Domain module | `services/social` (future) | Stage 1 |
-| Rights/Consent | Domain module | `services/rights` ✅ | Stage 2.21 foundation + Stage 2.22 requirements declarations (ports UNWIRED; cutover Stage 2.23; D2.22-4) |
+| Rights/Consent | Domain module | `services/rights` ✅ | Stage 2.21 foundation + Stage 2.22 requirements declarations; Stage 2.23 Publishing cutover complete (People/QC/Production still unwired) |
 | Asset Management | Domain module | `services/assets` (future) | Stage 1 |
 | Provenance | Query capability (not an owner) | over Generation/Asset immutable records | Never |
 | Project Management | Domain sub-module | inside `services/production-engine` | Never (in-process) |

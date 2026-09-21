@@ -1019,6 +1019,32 @@ describe("evaluateUseAgainstRequirements", () => {
     expect(verdict.reasons.join("; ")).toContain("platform_mismatch");
   });
 
+  it("D2.23-2: record_only declarations alone NEVER gate (observe-only)", async () => {
+    const store = makeStore();
+    store.subjects.push({ id: SUBJECT_REQ, orgId: ORG_A, status: "active" });
+    const svc = createRightsService({ repository: fakeRepo(store) });
+    await svc.createRequirement(admin(ORG_A), reqInput("record_only"));
+    const verdict = await svc.evaluateUseAgainstRequirements(
+      ORG_A, "digital_human", SUBJECT_REQ, "publication", "stratifit_media", "US", new Date(),
+    );
+    expect(verdict).toEqual({ declared: false, met: true, reasons: [] });
+  });
+
+  it("D2.23-2: enforce declarations gate even when record_only rows also exist", async () => {
+    const store = makeStore();
+    store.subjects.push({ id: SUBJECT_REQ, orgId: ORG_A, status: "active" });
+    const svc = createRightsService({ repository: fakeRepo(store) });
+    await svc.createRequirement(admin(ORG_A), { ...reqInput("record_only"), scope: "messaging" });
+    await svc.createRequirement(admin(ORG_A), reqInput("enforce"));
+    // No grants at all → enforce declaration gates, fail-closed.
+    const verdict = await svc.evaluateUseAgainstRequirements(
+      ORG_A, "digital_human", SUBJECT_REQ, "publication", "stratifit_media", "US", new Date(),
+    );
+    expect(verdict.declared).toBe(true);
+    expect(verdict.met).toBe(false);
+    expect(verdict.reasons.join("; ")).toContain("grant_not_found");
+  });
+
   it("multiple declarations aggregate: met if ANY declaration is satisfied", async () => {
     const store = makeStore();
     const { svc } = await seedSubjectWithGrant(store);

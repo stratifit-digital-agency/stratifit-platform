@@ -323,6 +323,23 @@ required rights are invalid (invariant 2). The rights *engine* is future work; t
 > port adapters and the pure subject/platform mapping functions are BUILT and
 > EXPORTED but NOT injected into any composition (D2.22-4/-5) — the cutover
 > that converts vacuous passes into blocking gates remains Stage 2.23.
+>
+> **Stage 2.23 Publishing cutover (D2.23-1..-5):** the Publication Rights
+> adapter is now INJECTED into the Publishing composition as `resolveRights`.
+> ONLY **approve** and **retry** (retry re-runs the approval gate by D2.12-E)
+> are Rights-gated — `createPublication`/`submit`/`schedule`/`publish`/
+> `unpublish`/`revise` are unchanged, and the Publishing state machine is
+> unchanged. Gating uses ONLY `enforce` requirements (D2.23-2):
+> `record_only` rows observe but never block; zero applicable `enforce`
+> declarations keep the vacuous pass (`declared: false`). Frozen evaluation
+> inputs: scope `publication`, platform `stratifit_media`, territory
+> `worldwide`, at gate-evaluation time (D2.23-3). Subject mapping is the
+> frozen Stage 2.22 table — `asset_version` maps to Rights `asset` with the
+> asset-version reference as the frozen convention (D2.23-4);
+> `ai_creator_profile`/`campaign_creative` remain vacuous (D2.23-5).
+> **People cutover is deferred to Stage 2.24** (enforcement point, People
+> scope mapping, and `"new"` pre-creation declarations remain open); QC
+> rights checks and Production `ManifestRights` remain untouched.
 
 ### Rights Owner
 A person or entity that can grant usage rights (an individual, a likeness owner, a

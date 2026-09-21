@@ -296,6 +296,22 @@ Public-safe + audience-private surface, rooted at `/api/media/*`:
 > (D2.22-3). Absence of declarations preserves the vacuous pass EXACTLY
 > (D2.22-2); nothing consumes declarations until the Stage 2.23 cutover
 > (D2.22-4).
+>
+> **Stage 2.23 Publishing cutover (D2.23-1..-5):** the `PublicationRightsPort`
+> is now wired in the Control composition (`createPublicationRightsAdapter`
+> over the Rights service). Effect on Publishing routes: **approve** fails with
+> the existing typed error `rights_requirements_unmet` when applicable `enforce`
+> requirements exist and no satisfying grant covers scope `publication` /
+> platform `stratifit_media` / territory `worldwide` at gate time; **retry**
+> re-runs the same gate (D2.12-E) and is blocked identically. `record_only`
+> declarations observe but never block (D2.23-2); zero applicable `enforce`
+> declarations keep the vacuous pass — approval behavior is unchanged for
+> subjects with no declarations. Creation, submit, schedule, publish,
+> unpublish, and revise are NOT rights-gated and the state machine is
+> unchanged. Unmapped publication subjects (`ai_creator_profile`,
+> `campaign_creative`) remain vacuous (D2.23-5). People remains unwired
+> (deferred to Stage 2.24); QC rights checks and Production `ManifestRights`
+> are untouched.
 
 | Family | Routes (representative) | Command/Query | Auth state | Backed by |
 |---|---|---|---|---|
