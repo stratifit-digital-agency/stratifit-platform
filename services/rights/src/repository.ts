@@ -25,6 +25,7 @@ import {
   productions,
   rightsGrants,
   rightsOwners,
+  rightsRequirements,
   rightsStatusEvents,
   type Database,
 } from "@stratifit/database";
@@ -32,10 +33,12 @@ import type {
   GrantStatus,
   OwnerKind,
   OwnerVerificationStatus,
+  RequirementEnforcement,
   RightsAuditWriter,
   RightsGrantRecord,
   RightsOwnerRecord,
   RightsRepository,
+  RightsRequirementRecord,
   RightsStatusEventRecord,
   RightsSubjectKind,
   RightsTransaction,
@@ -199,6 +202,58 @@ export const createDrizzleRightsRepository = (deps: DrizzleRightsRepositoryDeps)
           toStatus: asStatus(row!.toStatus),
         };
       },
+      findRequirementsBySubjectTx: async (orgId, subjectKind, subjectId) => {
+        const rows = await conn
+          .select()
+          .from(rightsRequirements)
+          .where(
+            and(
+              eq(rightsRequirements.orgId, orgId),
+              eq(rightsRequirements.subjectKind, subjectKind),
+              eq(rightsRequirements.subjectId, subjectId),
+            ),
+          );
+        return rows.map(mapRequirement);
+      },
+      insertRequirement: async (input) => {
+        const [row] = await conn
+          .insert(rightsRequirements)
+          .values({
+            orgId: input.orgId,
+            subjectKind: input.subjectKind,
+            subjectId: input.subjectId,
+            scope: input.scope,
+            platforms: [...input.platforms],
+            territories: [...input.territories],
+            enforcement: input.enforcement,
+            reason: input.reason,
+            createdBy: input.createdBy,
+          })
+          .returning();
+        return mapRequirement(row!);
+      },
+      updateRequirementCore: async (id, patch) => {
+        const [row] = await conn
+          .update(rightsRequirements)
+          .set({
+            ...(patch.platforms !== undefined ? { platforms: [...patch.platforms] } : {}),
+            ...(patch.territories !== undefined ? { territories: [...patch.territories] } : {}),
+            ...(patch.enforcement !== undefined ? { enforcement: patch.enforcement } : {}),
+            ...(patch.reason !== undefined ? { reason: patch.reason } : {}),
+            updatedAt: new Date(),
+          })
+          .where(eq(rightsRequirements.id, id))
+          .returning();
+        return row ? mapRequirement(row) : null;
+      },
+      deleteRequirement: async (id) => {
+        const rows = await conn.delete(rightsRequirements).where(eq(rightsRequirements.id, id)).returning();
+        return rows.length > 0;
+      },
+      findRequirementById: async (id) => {
+        const [row] = await conn.select().from(rightsRequirements).where(eq(rightsRequirements.id, id)).limit(1);
+        return row ? mapRequirement(row) : null;
+      },
       appendAudit,
     };
   };
@@ -209,6 +264,14 @@ export const createDrizzleRightsRepository = (deps: DrizzleRightsRepositoryDeps)
     scope: asScope(row.scope),
     platforms: row.platforms as RightsPlatform[],
     status: asStatus(row.status),
+  });
+
+  const mapRequirement = (row: typeof rightsRequirements.$inferSelect): RightsRequirementRecord => ({
+    ...row,
+    subjectKind: asSubjectKind(row.subjectKind),
+    scope: asScope(row.scope),
+    platforms: row.platforms as RightsPlatform[],
+    enforcement: row.enforcement as RequirementEnforcement,
   });
 
   const direct = mutationsFor(exec);
@@ -282,5 +345,34 @@ export const createDrizzleRightsRepository = (deps: DrizzleRightsRepositoryDeps)
     insertGrant: direct.insertGrant,
     setGrantStatus: direct.setGrantStatus,
     insertStatusEvent: direct.insertStatusEvent,
+
+    // -----------------------------------------------------------------
+    // Requirements declarations (Stage 2.22) — pool-level reads
+    // -----------------------------------------------------------------
+    findRequirementsBySubject: async (orgId, subjectKind, subjectId) => {
+      const rows = await exec
+        .select()
+        .from(rightsRequirements)
+        .where(
+          and(
+            eq(rightsRequirements.orgId, orgId),
+            eq(rightsRequirements.subjectKind, subjectKind),
+            eq(rightsRequirements.subjectId, subjectId),
+          ),
+        );
+      return rows.map(mapRequirement);
+    },
+    listRequirements: (orgId, limit) =>
+      exec
+        .select()
+        .from(rightsRequirements)
+        .where(eq(rightsRequirements.orgId, orgId))
+        .orderBy(desc(rightsRequirements.createdAt))
+        .limit(limit)
+        .then((rows) => rows.map(mapRequirement)),
+    insertRequirement: direct.insertRequirement,
+    updateRequirementCore: direct.updateRequirementCore,
+    deleteRequirement: direct.deleteRequirement,
+    findRequirementById: direct.findRequirementById,
   };
 };

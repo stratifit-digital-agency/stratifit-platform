@@ -86,6 +86,9 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     // (D2.21-7 ARWD; core immutability service-enforced).
     "rights_owners",
     "rights_grants",
+    // Stage 2.22 (Rights requirements declarations): mutable ARWD declaration
+    // family (D2.22-1; enforce-row immutability service-enforced, D2.22-3).
+    "rights_requirements",
   ] as const;
 
   // Immutable families (D2.6-4 / D2.7-4 / Stage 2.8 catalog versions /

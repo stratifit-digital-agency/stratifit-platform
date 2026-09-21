@@ -182,6 +182,7 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         // events (voice subject kind excluded pending DM OQ1, D2.21-1).
         "rightsOwners",
         "rightsGrants",
+        "rightsRequirements",
         "rightsStatusEvents",
       ].sort(),
     );
@@ -461,6 +462,10 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   rights_owners: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   rights_grants: ["DELETE", "INSERT", "SELECT", "UPDATE"],
   rights_status_events: ["INSERT", "SELECT"],
+  // Stage 2.22 (Rights requirements-declaration foundation, D2.22-1): mutable
+  // ARWD declaration family (enforce-row immutability is service-enforced,
+  // D2.22-3); NOTHING consumes it in Stage 2.22 (cutover deferred, D2.22-4).
+  rights_requirements: ["DELETE", "INSERT", "SELECT", "UPDATE"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -1396,5 +1401,31 @@ describe("rights family (Stage 2.21, D2.21-1..D2.21-8)", () => {
       expect(ddl44).toContain(`CREATE POLICY "runtime_all" ON public.${tbl}`);
     }
     expect(ddl44).not.toMatch(/TO PUBLIC/);
+  });
+
+  it("Stage 2.22 rights_requirements: frozen DDL shape + grants/RLS (D2.22-1)", () => {
+    const ddl45 = readFileSync(
+      fileURLToPath(new URL("../drizzle/0045_rights_requirements_schema.sql", import.meta.url)),
+      "utf8",
+    );
+    const mustContain = [
+      'CREATE TABLE "rights_requirements"',
+      'CONSTRAINT "rights_requirements_subject_scope_unique" UNIQUE("org_id","subject_kind","subject_id","scope")',
+      "\"rights_requirements\".\"subject_kind\" in ('digital_human', 'character', 'persona', 'asset', 'production')",
+      "\"rights_requirements\".\"scope\" in ('generation', 'publication', 'advertising', 'messaging', 'derivative_creation')",
+      "\"rights_requirements\".\"enforcement\" in ('enforce', 'record_only')",
+      "\"rights_requirements\".\"platforms\" <@ array['stratifit_media','youtube','tiktok','instagram','facebook','all']::text[]",
+      'REFERENCES "public"."organizations"("id") ON DELETE restrict',
+      "ENABLE ROW LEVEL SECURITY",
+    ];
+    for (const fragment of mustContain) expect(ddl45).toContain(fragment);
+    const ddl46 = readFileSync(
+      fileURLToPath(new URL("../drizzle/0046_rights_requirements_grants_policies.sql", import.meta.url)),
+      "utf8",
+    );
+    expect(ddl46).toContain("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.rights_requirements TO stratifit_runtime");
+    expect(ddl46).toContain('CREATE POLICY runtime_all ON public.rights_requirements');
+    expect(ddl46).toContain("TO stratifit_runtime");
+    expect(ddl46).not.toMatch(/TO PUBLIC/);
   });
 });

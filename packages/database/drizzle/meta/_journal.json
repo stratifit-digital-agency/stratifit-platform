@@ -309,6 +309,13 @@
       "when": 1789988187444,
       "tag": "0043_flaky_mother_askani",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1789996633521,
+      "tag": "0045_rights_requirements_schema",
+      "breakpoints": true
     }
   ]
 }

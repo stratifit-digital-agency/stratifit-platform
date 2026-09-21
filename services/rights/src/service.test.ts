@@ -19,6 +19,7 @@ import type {
   RightsOwnerRecord,
   RightsPrincipal,
   RightsRepository,
+  RightsRequirementRecord,
   RightsStatusEventRecord,
   RightsTransaction,
 } from "./types";
@@ -35,6 +36,8 @@ type Store = {
   audit: Parameters<RightsAuditAppend>[0][];
   /** Subject rows live in OTHER contexts; minimal refs for the integrity seam. */
   subjects: { id: string; orgId: string; status: string }[];
+  /** Stage 2.22: requirements declarations (fake of rights_requirements). */
+  requirements: RightsRequirementRecord[];
   /** Test hook: force the next mutation to throw (rollback/atomicity proofs). */
   failNextMutation?: boolean;
 };
@@ -43,7 +46,7 @@ const now = () => new Date();
 let n = 0;
 const seq = () => `00000000-0000-4000-8000-${String(++n).padStart(12, "0")}`;
 
-const makeStore = (): Store => ({ owners: [], grants: [], events: [], audit: [], subjects: [] });
+const makeStore = (): Store => ({ owners: [], grants: [], events: [], audit: [], subjects: [], requirements: [] });
 
 const makeTx = (store: Store): RightsTransaction => ({
   findOwnerById: async (id) => store.owners.find((r) => r.id === id) ?? null,
@@ -118,6 +121,59 @@ const makeTx = (store: Store): RightsTransaction => ({
     store.events.push(row);
     return row;
   },
+  findRequirementsBySubjectTx: async (orgId, subjectKind, subjectId) =>
+    store.requirements.filter(
+      (r) => r.orgId === orgId && r.subjectKind === subjectKind && r.subjectId === subjectId,
+    ),
+  insertRequirement: async (input) => {
+    if (store.failNextMutation) throw new Error("forced insert failure");
+    if (
+      store.requirements.some(
+        (r) =>
+          r.orgId === input.orgId && r.subjectKind === input.subjectKind && r.subjectId === input.subjectId && r.scope === input.scope,
+      )
+    ) {
+      throw Object.assign(new Error("duplicate requirement"), { code: "23505" });
+    }
+    const row: RightsRequirementRecord = {
+      id: seq(),
+      orgId: input.orgId,
+      subjectKind: input.subjectKind,
+      subjectId: input.subjectId,
+      scope: input.scope,
+      platforms: [...input.platforms],
+      territories: [...input.territories],
+      enforcement: input.enforcement,
+      reason: input.reason,
+      createdBy: input.createdBy,
+      createdAt: now(),
+      updatedAt: now(),
+    };
+    store.requirements.push(row);
+    return row;
+  },
+  updateRequirementCore: async (id, patch) => {
+    if (store.failNextMutation) throw new Error("forced update failure");
+    const row = store.requirements.find((r) => r.id === id);
+    if (!row) return null;
+    const updated: RightsRequirementRecord = {
+      ...row,
+      ...(patch.platforms !== undefined ? { platforms: [...patch.platforms] } : {}),
+      ...(patch.territories !== undefined ? { territories: [...patch.territories] } : {}),
+      ...(patch.enforcement !== undefined ? { enforcement: patch.enforcement } : {}),
+      ...(patch.reason !== undefined ? { reason: patch.reason } : {}),
+      updatedAt: now(),
+    };
+    store.requirements = store.requirements.map((r) => (r.id === id ? updated : r));
+    return updated;
+  },
+  deleteRequirement: async (id) => {
+    if (store.failNextMutation) throw new Error("forced delete failure");
+    const before = store.requirements.length;
+    store.requirements = store.requirements.filter((r) => r.id !== id);
+    return store.requirements.length < before;
+  },
+  findRequirementById: async (id) => store.requirements.find((r) => r.id === id) ?? null,
   appendAudit: async (entry) => {
     store.audit.push(entry);
   },
@@ -146,6 +202,15 @@ const fakeRepo = (store: Store): RightsRepository => ({
     ),
   listGrants: async (orgId, limit) => store.grants.filter((r) => r.orgId === orgId).slice(0, limit),
   listStatusEvents: async (grantId) => store.events.filter((r) => r.grantId === grantId),
+  findRequirementsBySubject: async (orgId, subjectKind, subjectId) =>
+    store.requirements.filter(
+      (r) => r.orgId === orgId && r.subjectKind === subjectKind && r.subjectId === subjectId,
+    ),
+  listRequirements: async (orgId, limit) => store.requirements.filter((r) => r.orgId === orgId).slice(0, limit),
+  insertRequirement: makeTx(store).insertRequirement,
+  updateRequirementCore: makeTx(store).updateRequirementCore,
+  deleteRequirement: makeTx(store).deleteRequirement,
+  findRequirementById: makeTx(store).findRequirementById,
   setStatusEvent: async ({ event }) =>
     makeTx(store).insertStatusEvent({
       orgId: event.orgId,
@@ -650,5 +715,401 @@ describe("evaluateUse", () => {
     const svc = await seedActive({ store, platforms: ["all"], territories: ["worldwide"] });
     const result = await svc.evaluateUse({ ...useRequest(), platform: "tiktok", territory: "JP" });
     expect(result.satisfied).toBe(true);
+  });
+});
+// ---------------------------------------------------------------------------
+// Stage 2.22 — requirements declarations (D2.22-1..D2.22-6)
+// ---------------------------------------------------------------------------
+
+import {
+  createPeopleRightsAdapter,
+  createPublicationRightsAdapter,
+  platformTargetToRightsPlatform,
+  publicationSubjectToRightsSubject,
+} from "./service";
+
+const SUBJECT_REQ = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+
+const reqInput = (enforcement: "enforce" | "record_only" = "enforce") => ({
+  subjectKind: "digital_human" as const,
+  subjectId: SUBJECT_REQ,
+  scope: "publication" as const,
+  platforms: ["stratifit_media" as const],
+  territories: ["worldwide"],
+  enforcement,
+});
+
+describe("rights requirements — authoring", () => {
+  it("creates an enforce declaration with subject validated in-transaction + frozen audit action", async () => {
+    const store = makeStore();
+    store.subjects.push({ id: SUBJECT_REQ, orgId: ORG_A, status: "active" });
+    const svc = createRightsService({ repository: fakeRepo(store) });
+    const p = admin(ORG_A);
+    const result = await svc.createRequirement(p, {
+      subjectKind: "digital_human",
+      subjectId: SUBJECT_REQ,
+      scope: "publication",
+      platforms: ["stratifit_media"],
+      territories: ["worldwide"],
+      enforcement: "enforce",
+      reason: "likeness consent on file",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.enforcement).toBe("enforce");
+    expect(result.value.createdBy).toBe(p.operatorId);
+    expect(store.audit.at(-1)!.action).toBe("rights.requirement_recorded");
+    expect(store.audit.at(-1)!.actorId).toBe(p.operatorId);
+    expect(store.audit.at(-1)!.organizationId).toBe(ORG_A);
+  });
+
+  it("rejects cross-org subject references as not_found with zero rows + zero audit", async () => {
+    const store = makeStore();
+    store.subjects.push({ id: SUBJECT_REQ, orgId: ORG_B, status: "active" });
+    const svc = createRightsService({ repository: fakeRepo(store) });
+    const auditBefore = store.audit.length;
+    const result = await svc.createRequirement(admin(ORG_A), {
+      subjectKind: "digital_human",
+      subjectId: SUBJECT_REQ,
+      scope: "publication",
+      platforms: ["all"],
+      territories: ["worldwide"],
+      enforcement: "enforce",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.reason).toBe("not_found");
+    expect(store.requirements).toHaveLength(0);
+    expect(store.audit.length).toBe(auditBefore);
+  });
+
+  it("rejects missing subject references and invalid vocabularies", async () => {
+    const store = makeStore();
+    const svc = createRightsService({ repository: fakeRepo(store) });
+    const missing = await svc.createRequirement(admin(ORG_A), {
+      subjectKind: "digital_human",
+      subjectId: SUBJECT_REQ,
+      scope: "publication",
+      platforms: ["all"],
+      territories: ["worldwide"],
+      enforcement: "enforce",
+    });
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.error.reason).toBe("not_found");
+    const badScope = await svc.createRequirement(admin(ORG_A), {
+      subjectKind: "digital_human",
+      subjectId: SUBJECT_REQ,
+      scope: "broadcast" as never,
+      platforms: ["all"],
+      territories: ["worldwide"],
+      enforcement: "enforce",
+    });
+    expect(badScope.ok).toBe(false);
+    if (!badScope.ok) expect(badScope.error.reason).toBe("invalid_input");
+  });
+
+  it("enforces capability gates: reviewer cannot create/delete requirements", async () => {
+    const store = makeStore();
+    store.subjects.push({ id: SUBJECT_REQ, orgId: ORG_A, status: "active" });
+    const svc = createRightsService({ repository: fakeRepo(store) });
+    const created = await svc.createRequirement(admin(ORG_A), {
+      subjectKind: "digital_human",
+      subjectId: SUBJECT_REQ,
+      scope: "publication",
+      platforms: ["all"],
+      territories: ["worldwide"],
+      enforcement: "record_only",
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const denied = await svc.deleteRequirement(reviewer(ORG_A), created.value.id);
+    expect(denied.ok).toBe(false);
+    if (!denied.ok) expect(denied.error.reason).toBe("unauthorized");
+  });
+
+  it("is IDOR-safe: cross-org update/delete/detail are not_found", async () => {
+    const store = makeStore();
+    store.subjects.push({ id: SUBJECT_REQ, orgId: ORG_A, status: "active" });
+    const svc = createRightsService({ repository: fakeRepo(store) });
+    const created = await svc.createRequirement(admin(ORG_A), {
+      subjectKind: "digital_human",
+      subjectId: SUBJECT_REQ,
+      scope: "publication",
+      platforms: ["all"],
+      territories: ["worldwide"],
+      enforcement: "record_only",
+    });
+    if (!created.ok) throw new Error("seed failed");
+    const upd = await svc.updateRequirement(admin(ORG_B), { id: created.value.id, reason: "x" });
+    expect(upd.ok).toBe(false);
+    if (!upd.ok) expect(upd.error.reason).toBe("not_found");
+    const del = await svc.deleteRequirement(admin(ORG_B), created.value.id);
+    expect(del.ok).toBe(false);
+    if (!del.ok) expect(del.error.reason).toBe("not_found");
+  });
+
+  it("D2.22-3: enforce rows are immutable; record_only rows may be corrected", async () => {
+    const store = makeStore();
+    store.subjects.push({ id: SUBJECT_REQ, orgId: ORG_A, status: "active" });
+    const svc = createRightsService({ repository: fakeRepo(store) });
+    const enforce = await svc.createRequirement(admin(ORG_A), {
+      subjectKind: "digital_human",
+      subjectId: SUBJECT_REQ,
+      scope: "publication",
+      platforms: ["all"],
+      territories: ["worldwide"],
+      enforcement: "enforce",
+    });
+    if (!enforce.ok) throw new Error("seed failed");
+    const blocked = await svc.updateRequirement(admin(ORG_A), { id: enforce.value.id, reason: "try edit" });
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.error.reason).toBe("invalid_input");
+    const recordOnly = await svc.createRequirement(admin(ORG_A), {
+      subjectKind: "digital_human",
+      subjectId: SUBJECT_REQ,
+      scope: "messaging",
+      platforms: ["all"],
+      territories: ["worldwide"],
+      enforcement: "record_only",
+    });
+    if (!recordOnly.ok) throw new Error("seed failed");
+    const corrected = await svc.updateRequirement(admin(ORG_A), {
+      id: recordOnly.value.id,
+      territories: ["US", "DE"],
+      reason: "corrected scope",
+    });
+    expect(corrected.ok).toBe(true);
+    if (corrected.ok) expect(corrected.value.territories).toEqual(["US", "DE"]);
+  });
+
+  it("retires by delete (authorized + audited) — replacement path for enforce rows", async () => {
+    const store = makeStore();
+    store.subjects.push({ id: SUBJECT_REQ, orgId: ORG_A, status: "active" });
+    const svc = createRightsService({ repository: fakeRepo(store) });
+    const created = await svc.createRequirement(admin(ORG_A), {
+      subjectKind: "digital_human",
+      subjectId: SUBJECT_REQ,
+      scope: "publication",
+      platforms: ["all"],
+      territories: ["worldwide"],
+      enforcement: "enforce",
+    });
+    if (!created.ok) throw new Error("seed failed");
+    const retired = await svc.deleteRequirement(admin(ORG_A), created.value.id);
+    expect(retired.ok).toBe(true);
+    expect(store.requirements).toHaveLength(0);
+    expect(store.audit.at(-1)!.action).toBe("rights.requirement_recorded");
+  });
+
+  it("rolls back mutation + audit when the insert throws (D2.4-1)", async () => {
+    const store = makeStore();
+    store.subjects.push({ id: SUBJECT_REQ, orgId: ORG_A, status: "active" });
+    const svc = createRightsService({ repository: fakeRepo(store) });
+    const auditBefore = store.audit.length;
+    store.failNextMutation = true;
+    await expect(
+      svc.createRequirement(admin(ORG_A), {
+        subjectKind: "digital_human",
+        subjectId: SUBJECT_REQ,
+        scope: "publication",
+        platforms: ["all"],
+        territories: ["worldwide"],
+        enforcement: "enforce",
+      }),
+    ).rejects.toThrow("forced insert failure");
+    store.failNextMutation = false;
+    expect(store.requirements).toHaveLength(0);
+    expect(store.audit.length).toBe(auditBefore);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stage 2.22 — evaluateUseAgainstRequirements (D2.22-2)
+// ---------------------------------------------------------------------------
+
+describe("evaluateUseAgainstRequirements", () => {
+  const seedSubjectWithGrant = async (store: ReturnType<typeof makeStore>) => {
+    store.subjects.push({ id: SUBJECT_REQ, orgId: ORG_A, status: "active" });
+    const svc = createRightsService({ repository: fakeRepo(store) });
+    const { p, owner } = await seedOwner(svc, ORG_A);
+    const grant = await svc.createGrant(p, {
+      ...baseGrantInput(owner.id),
+      subjectKind: "digital_human",
+      subjectId: SUBJECT_REQ,
+      scope: "publication",
+      platforms: ["stratifit_media"],
+      territories: ["worldwide"],
+    });
+    if (!grant.ok) throw new Error(grant.error.message);
+    await svc.changeGrantStatus(p, { id: grant.value.id, status: "active" });
+    return { svc, p };
+  };
+
+  it("D2.22-2: no declarations → { declared: false } (vacuous pass preserved EXACTLY)", async () => {
+    const store = makeStore();
+    const { svc } = await seedSubjectWithGrant(store);
+    const verdict = await svc.evaluateUseAgainstRequirements(
+      ORG_A, "digital_human", SUBJECT_REQ, "publication", "stratifit_media", "US", new Date(),
+    );
+    expect(verdict).toEqual({ declared: false, met: true, reasons: [] });
+  });
+
+  it("declared + satisfied grant → { declared: true, met: true }", async () => {
+    const store = makeStore();
+    const { svc } = await seedSubjectWithGrant(store);
+    const created = await svc.createRequirement(admin(ORG_A), reqInput());
+    expect(created.ok).toBe(true);
+    const verdict = await svc.evaluateUseAgainstRequirements(
+      ORG_A, "digital_human", SUBJECT_REQ, "publication", "stratifit_media", "US", new Date(),
+    );
+    expect(verdict.declared).toBe(true);
+    expect(verdict.met).toBe(true);
+    expect(verdict.reasons).toHaveLength(0);
+  });
+
+  it("declared + unsatisfied (no active grant) → { declared: true, met: false } fail-closed", async () => {
+    const store = makeStore();
+    store.subjects.push({ id: SUBJECT_REQ, orgId: ORG_A, status: "active" });
+    const svc = createRightsService({ repository: fakeRepo(store) });
+    await svc.createRequirement(admin(ORG_A), reqInput());
+    const verdict = await svc.evaluateUseAgainstRequirements(
+      ORG_A, "digital_human", SUBJECT_REQ, "publication", "stratifit_media", "US", new Date(),
+    );
+    expect(verdict.declared).toBe(true);
+    expect(verdict.met).toBe(false);
+    expect(verdict.reasons.length).toBeGreaterThan(0);
+    expect(verdict.reasons.join("; ")).toContain("grant_not_found");
+  });
+
+  it("declared + revoked grant → fail-closed with grant_not_active", async () => {
+    const store = makeStore();
+    const { svc, p } = await seedSubjectWithGrant(store);
+    await svc.createRequirement(admin(ORG_A), reqInput());
+    const grants = await svc.listGrants(admin(ORG_A));
+    if (!grants.ok) throw new Error(grants.error.message);
+    await svc.changeGrantStatus(p, { id: grants.value[0]!.id, status: "revoked" });
+    const verdict = await svc.evaluateUseAgainstRequirements(
+      ORG_A, "digital_human", SUBJECT_REQ, "publication", "stratifit_media", "US", new Date(),
+    );
+    expect(verdict.declared).toBe(true);
+    expect(verdict.met).toBe(false);
+    expect(verdict.reasons.join("; ")).toContain("grant_not_active");
+  });
+
+  it("scope mismatch between declaration and use → declared, unmet", async () => {
+    const store = makeStore();
+    const { svc } = await seedSubjectWithGrant(store);
+    await svc.createRequirement(admin(ORG_A), reqInput()); // publication scope declared
+    const verdict = await svc.evaluateUseAgainstRequirements(
+      ORG_A, "digital_human", SUBJECT_REQ, "advertising", "stratifit_media", "US", new Date(),
+    );
+    expect(verdict.declared).toBe(true);
+    expect(verdict.met).toBe(false);
+    expect(verdict.reasons.join("; ")).toContain("covers scope publication, not advertising");
+  });
+
+  it("platform mismatch → declared, unmet through the existing evaluator", async () => {
+    const store = makeStore();
+    const { svc } = await seedSubjectWithGrant(store);
+    await svc.createRequirement(admin(ORG_A), reqInput());
+    const verdict = await svc.evaluateUseAgainstRequirements(
+      ORG_A, "digital_human", SUBJECT_REQ, "publication", "youtube", "US", new Date(),
+    );
+    expect(verdict.declared).toBe(true);
+    expect(verdict.met).toBe(false);
+    expect(verdict.reasons.join("; ")).toContain("platform_mismatch");
+  });
+
+  it("multiple declarations aggregate: met if ANY declaration is satisfied", async () => {
+    const store = makeStore();
+    const { svc } = await seedSubjectWithGrant(store);
+    // First declaration: publication only (satisfied by the active grant).
+    await svc.createRequirement(admin(ORG_A), reqInput());
+    // Second declaration: advertising scope (no grant covers it) — same subject, other scope.
+    const second = await svc.createRequirement(admin(ORG_A), ({
+      ...reqInput(),
+      scope: "advertising" as const,
+    }));
+    expect(second.ok).toBe(true);
+    const verdict = await svc.evaluateUseAgainstRequirements(
+      ORG_A, "digital_human", SUBJECT_REQ, "publication", "stratifit_media", "US", new Date(),
+    );
+    // The publication declaration is satisfiable → met overall.
+    expect(verdict.declared).toBe(true);
+    expect(verdict.met).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stage 2.22 — mapping functions + adapters (D2.22-4/-5)
+// ---------------------------------------------------------------------------
+
+describe("mapping functions (pure)", () => {
+  it("publicationSubjectToRightsSubject: frozen table incl. null for out-of-scope kinds", () => {
+    expect(publicationSubjectToRightsSubject("production")).toBe("production");
+    expect(publicationSubjectToRightsSubject("asset_version")).toBe("asset");
+    expect(publicationSubjectToRightsSubject("ai_creator_profile")).toBeNull();
+    expect(publicationSubjectToRightsSubject("campaign_creative")).toBeNull();
+  });
+
+  it("platformTargetToRightsPlatform: hyphen → underscore, others identity", () => {
+    expect(platformTargetToRightsPlatform("stratifit-media")).toBe("stratifit_media");
+    expect(platformTargetToRightsPlatform("youtube")).toBe("youtube");
+    expect(platformTargetToRightsPlatform("tiktok")).toBe("tiktok");
+    expect(platformTargetToRightsPlatform("instagram")).toBe("instagram");
+    expect(platformTargetToRightsPlatform("facebook")).toBe("facebook");
+  });
+});
+
+describe("port adapters (D2.22-4: built + exported, NOT injected)", () => {
+  it("publication adapter: undeclared subject → declared:false; declared+met → met", async () => {
+    const store = makeStore();
+    store.subjects.push({ id: SUBJECT_REQ, orgId: ORG_A, status: "active" });
+    const svc = createRightsService({ repository: fakeRepo(store) });
+    const adapter = createPublicationRightsAdapter(svc);
+    // No declarations → vacuous (exact port shape incl. the reasons array).
+    const undeclared = await adapter(ORG_A, "production", SUBJECT_REQ);
+    expect(undeclared).toEqual({ declared: false, met: true, reasons: [] });
+    // Out-of-scope subject kind → vacuous, never invents a requirement.
+    const outOfScope = await adapter(ORG_A, "ai_creator_profile", SUBJECT_REQ);
+    expect(outOfScope).toEqual({ declared: false, met: true });
+    // Declared + satisfied — declared for the MAPPED kind (production) since
+    // the adapter maps publication subjects before evaluating.
+    const { p, owner } = await seedOwner(svc, ORG_A);
+    const grant = await svc.createGrant(p, {
+      ...baseGrantInput(owner.id),
+      subjectKind: "production",
+      subjectId: SUBJECT_REQ,
+      scope: "publication",
+      platforms: ["stratifit_media"],
+      territories: ["worldwide"],
+    });
+    if (!grant.ok) throw new Error(grant.error.message);
+    await svc.changeGrantStatus(p, { id: grant.value.id, status: "active" });
+    await svc.createRequirement(admin(ORG_A), {
+      subjectKind: "production",
+      subjectId: SUBJECT_REQ,
+      scope: "publication",
+      platforms: ["stratifit_media"],
+      territories: ["worldwide"],
+      enforcement: "enforce",
+    });
+    const declared = await adapter(ORG_A, "production", SUBJECT_REQ);
+    expect(declared.declared).toBe(true);
+    expect(declared.met).toBe(true);
+  });
+
+  it("people adapter: ai_creator → vacuous; declared+unmet → fails closed", async () => {
+    const store = makeStore();
+    store.subjects.push({ id: SUBJECT_REQ, orgId: ORG_A, status: "active" });
+    const svc = createRightsService({ repository: fakeRepo(store) });
+    const adapter = createPeopleRightsAdapter(svc);
+    const aiCreator = await adapter({ orgId: ORG_A, subjectKind: "ai_creator", subjectId: SUBJECT_REQ });
+    expect(aiCreator).toEqual({ declared: false, met: true });
+    const undeclared = await adapter({ orgId: ORG_A, subjectKind: "digital_human", subjectId: SUBJECT_REQ });
+    expect(undeclared).toEqual({ declared: false, met: true });
+    await svc.createRequirement(admin(ORG_A), reqInput());
+    const denied = await adapter({ orgId: ORG_A, subjectKind: "digital_human", subjectId: SUBJECT_REQ });
+    expect(denied.declared).toBe(true);
+    expect(denied.met).toBe(false);
   });
 });

@@ -102,7 +102,7 @@ export interface RightsStatusEventRecord {
 export type RightsAuditAppend = (entry: {
   actorId: string;
   action: string;
-  targetType: "rights_owner" | "rights_grant";
+  targetType: "rights_owner" | "rights_grant" | "rights_requirement";
   targetId: string;
   organizationId?: string | null;
   metadata?: Record<string, unknown>;
@@ -114,12 +114,13 @@ export interface RightsAuditWriter {
   appendWithin(tx: unknown, entry: Parameters<RightsAuditAppend>[0]): Promise<void>;
 }
 
-/** FROZEN audit actions (Stage 2.21, D2.21-8): exactly these four. */
+/** FROZEN audit actions (Stage 2.21, D2.21-8 + Stage 2.22, D2.22-6): exactly these five. */
 export const RIGHTS_AUDIT_ACTIONS = [
   "rights.owner_created",
   "rights.owner_status_changed",
   "rights.grant_created",
   "rights.grant_status_changed",
+  "rights.requirement_recorded",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -168,6 +169,12 @@ export interface RightsRepository {
   listGrants(orgId: string, limit: number): Promise<readonly RightsGrantRecord[]>;
   listStatusEvents(grantId: string): Promise<readonly RightsStatusEventRecord[]>;
   setStatusEvent(as: { event: Omit<RightsStatusEventRecord, "id" | "createdAt"> }): Promise<RightsStatusEventRecord>;
+  findRequirementsBySubject(
+    orgId: string,
+    subjectKind: RightsSubjectKind,
+    subjectId: string,
+  ): Promise<readonly RightsRequirementRecord[]>;
+  listRequirements(orgId: string, limit: number): Promise<readonly RightsRequirementRecord[]>;
 
   // direct mutations (test-only sequential fallback)
   insertOwner(input: {
@@ -199,6 +206,28 @@ export interface RightsRepository {
     reason: string | null;
     actorId: string;
   }): Promise<RightsStatusEventRecord>;
+  insertRequirement(input: {
+    orgId: string;
+    subjectKind: RightsSubjectKind;
+    subjectId: string;
+    scope: RightsScope;
+    platforms: readonly RightsPlatform[];
+    territories: readonly string[];
+    enforcement: RequirementEnforcement;
+    reason: string | null;
+    createdBy: string;
+  }): Promise<RightsRequirementRecord>;
+  updateRequirementCore(
+    id: string,
+    patch: {
+      platforms?: readonly RightsPlatform[];
+      territories?: readonly string[];
+      enforcement?: RequirementEnforcement;
+      reason?: string | null;
+    },
+  ): Promise<RightsRequirementRecord | null>;
+  deleteRequirement(id: string): Promise<boolean>;
+  findRequirementById(id: string): Promise<RightsRequirementRecord | null>;
 }
 
 /**
@@ -252,6 +281,34 @@ export interface RightsTransaction {
     reason: string | null;
     actorId: string;
   }): Promise<RightsStatusEventRecord>;
+  insertRequirement(input: {
+    orgId: string;
+    subjectKind: RightsSubjectKind;
+    subjectId: string;
+    scope: RightsScope;
+    platforms: readonly RightsPlatform[];
+    territories: readonly string[];
+    enforcement: RequirementEnforcement;
+    reason: string | null;
+    createdBy: string;
+  }): Promise<RightsRequirementRecord>;
+  updateRequirementCore(
+    id: string,
+    patch: {
+      platforms?: readonly RightsPlatform[];
+      territories?: readonly string[];
+      enforcement?: RequirementEnforcement;
+      reason?: string | null;
+    },
+  ): Promise<RightsRequirementRecord | null>;
+  deleteRequirement(id: string): Promise<boolean>;
+  findRequirementById(id: string): Promise<RightsRequirementRecord | null>;
+  /** D2.22-2: requirement lookup for the port-compatible evaluator. */
+  findRequirementsBySubjectTx(
+    orgId: string,
+    subjectKind: RightsSubjectKind,
+    subjectId: string,
+  ): Promise<readonly RightsRequirementRecord[]>;
   appendAudit(entry: Parameters<RightsAuditAppend>[0]): Promise<void>;
 }
 
@@ -274,6 +331,59 @@ export interface CreateOwnerInput {
 
 /** Owner verification-status change (operator command). */
 export type OwnerVerificationInput = { readonly id: string; readonly status: OwnerVerificationStatus };
+
+// ---------------------------------------------------------------------------
+// Requirements declarations (Stage 2.22, D2.22-1..D2.22-6)
+// ---------------------------------------------------------------------------
+
+/** D2.22-3 enforcement modes: `enforce` rows are immutable after creation. */
+export const REQUIREMENT_ENFORCEMENTS = ["enforce", "record_only"] as const;
+export type RequirementEnforcement = (typeof REQUIREMENT_ENFORCEMENTS)[number];
+
+export interface RightsRequirementRecord {
+  readonly id: string;
+  readonly orgId: string;
+  readonly subjectKind: RightsSubjectKind;
+  readonly subjectId: string;
+  readonly scope: RightsScope;
+  readonly platforms: readonly RightsPlatform[];
+  readonly territories: readonly string[];
+  readonly enforcement: RequirementEnforcement;
+  readonly reason: string | null;
+  readonly createdBy: string;
+  readonly createdAt: Date;
+  readonly updatedAt: Date;
+}
+
+export interface CreateRequirementInput {
+  readonly subjectKind: RightsSubjectKind;
+  readonly subjectId: string;
+  readonly scope: RightsScope;
+  readonly platforms: readonly RightsPlatform[];
+  readonly territories: readonly string[];
+  readonly enforcement: RequirementEnforcement;
+  readonly reason?: string | null;
+}
+
+/**
+ * D2.22-3 correction semantics: `record_only` rows may be corrected (any
+ * core field); `enforce` rows are IMMUTABLE — retire by DELETE + re-create
+ * (the DELETE itself is authorized + audited).
+ */
+export interface UpdateRequirementInput {
+  readonly id: string;
+  readonly platforms?: readonly RightsPlatform[];
+  readonly territories?: readonly string[];
+  readonly enforcement?: RequirementEnforcement;
+  readonly reason?: string | null;
+}
+
+/** Port-compatible verdict (publishing + people adapters, D2.22-4). */
+export interface RequirementsVerdict {
+  readonly declared: boolean;
+  readonly met: boolean;
+  readonly reasons: readonly string[];
+}
 
 export interface CreateGrantInput {
   readonly ownerId: string;
@@ -345,6 +455,12 @@ export interface RightsService {
   createGrant(principal: RightsPrincipal, input: CreateGrantInput): Promise<RightsResult<RightsGrantRecord>>;
   changeGrantStatus(principal: RightsPrincipal, input: GrantStatusInput): Promise<RightsResult<RightsGrantRecord>>;
 
+  // ---- Requirements declarations (Stage 2.22, D2.22-1/-3) ----------------
+  createRequirement(principal: RightsPrincipal, input: CreateRequirementInput): Promise<RightsResult<RightsRequirementRecord>>;
+  updateRequirement(principal: RightsPrincipal, input: UpdateRequirementInput): Promise<RightsResult<RightsRequirementRecord>>;
+  deleteRequirement(principal: RightsPrincipal, id: string): Promise<RightsResult<{ id: string }>>;
+  listRequirements(principal: RightsPrincipal, limit?: number): Promise<RightsResult<readonly RightsRequirementRecord[]>>;
+
   // ---- Reads (rights.read) ----------------------------------------------
   listOwners(principal: RightsPrincipal, limit?: number): Promise<RightsResult<readonly RightsOwnerRecord[]>>;
   listGrants(principal: RightsPrincipal, limit?: number): Promise<RightsResult<readonly RightsGrantRecord[]>>;
@@ -352,4 +468,19 @@ export interface RightsService {
 
   // ---- Evaluation (pure function over the repository; UNWIRED elsewhere) --
   evaluateUse(request: UseRequest): Promise<UseEvaluation>;
+  /**
+   * D2.22-2: the port-compatible evaluation. NO declarations for the subject
+   * → `{ declared: false }` (today's vacuous-pass semantics preserved
+   * EXACTLY). Declarations present → per-declaration evaluateUse logic,
+   * aggregated into `{ declared, met, reasons }`.
+   */
+  evaluateUseAgainstRequirements(
+    orgId: string,
+    subjectKind: RightsSubjectKind,
+    subjectId: string,
+    scope: RightsScope,
+    platform: RightsPlatform,
+    territory: string,
+    at: Date,
+  ): Promise<RequirementsVerdict>;
 }

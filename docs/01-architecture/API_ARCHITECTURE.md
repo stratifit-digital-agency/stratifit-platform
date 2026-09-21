@@ -286,6 +286,16 @@ Public-safe + audience-private surface, rooted at `/api/media/*`:
 > owner/subject integrity (same-org, fail-closed `not_found`), and the four
 > same-transaction audit actions (D2.21-8). NO Media surface; no `rights.*`
 > events (D2.21-3 — `rights_status_events` is the history of record).
+>
+> **Stage 2.22 route note:** requirements declarations at
+> `/api/control/rights/requirements` (GET list + POST record) and
+> `/api/control/rights/requirements/[id]` (PATCH correct a `record_only` row /
+> DELETE retire) with the same capability matrix, strict Zod, §13 envelope,
+> and the additional same-transaction audit action
+> `rights.requirement_recorded` (D2.22-6). `enforce` rows are immutable
+> (D2.22-3). Absence of declarations preserves the vacuous pass EXACTLY
+> (D2.22-2); nothing consumes declarations until the Stage 2.23 cutover
+> (D2.22-4).
 
 | Family | Routes (representative) | Command/Query | Auth state | Backed by |
 |---|---|---|---|---|

@@ -2835,3 +2835,63 @@ export const rightsStatusEvents = pgTable(
 
 export type RightsStatusEventRow = typeof rightsStatusEvents.$inferSelect;
 export type NewRightsStatusEventRow = typeof rightsStatusEvents.$inferInsert;
+
+/**
+ * Rights requirements declarations (Stage 2.22, D2.22-1).
+ *
+ * Declares WHAT usage a subject requires before the Rights evaluator treats
+ * rights as relevant: without a declaration row the subject is `declared:
+ * false` (vacuous pass — D2.22-2, preserving Stage 2.12/2.16 semantics
+ * EXACTLY). UNIQUE(org, subject_kind, subject_id, scope). `enforce` rows are
+ * IMMUTABLE after creation (D2.22-3: retire by replacement, never edit core
+ * semantics); `record_only` rows may be corrected. This is the declaration
+ * model that makes a future port cutover principled (Stage 2.23); nothing
+ * consumes it in Stage 2.22.
+ */
+export const rightsRequirements = pgTable(
+  "rights_requirements",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    subjectKind: text("subject_kind").notNull(),
+    subjectId: uuid("subject_id").notNull(),
+    scope: text("scope").notNull(),
+    platforms: text("platforms").array().notNull(),
+    territories: text("territories").array().notNull(),
+    enforcement: text("enforcement").notNull(),
+    reason: text("reason"),
+    createdBy: uuid("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("rights_requirements_subject_scope_unique").on(t.orgId, t.subjectKind, t.subjectId, t.scope),
+    check(
+      "rights_requirements_subject_kind_check",
+      sql`${t.subjectKind} in ('digital_human', 'character', 'persona', 'asset', 'production')`,
+    ),
+    check(
+      "rights_requirements_scope_check",
+      sql`${t.scope} in ('generation', 'publication', 'advertising', 'messaging', 'derivative_creation')`,
+    ),
+    check(
+      "rights_requirements_enforcement_check",
+      sql`${t.enforcement} in ('enforce', 'record_only')`,
+    ),
+    check(
+      "rights_requirements_platforms_check",
+      sql`${t.platforms} <@ array['stratifit_media','youtube','tiktok','instagram','facebook','all']::text[] and array_length(${t.platforms}, 1) >= 1`,
+    ),
+    check(
+      "rights_requirements_reason_len_check",
+      sql`${t.reason} is null or length(${t.reason}) <= 1000`,
+    ),
+    index("idx_rights_requirements_subject").on(t.orgId, t.subjectKind, t.subjectId),
+    index("idx_rights_requirements_org").on(t.orgId),
+  ],
+).enableRLS();
+
+export type RightsRequirementRow = typeof rightsRequirements.$inferSelect;
+export type NewRightsRequirementRow = typeof rightsRequirements.$inferInsert;

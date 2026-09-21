@@ -314,6 +314,15 @@ required rights are invalid (invariant 2). The rights *engine* is future work; t
 > by the exported fail-closed `evaluateUse` seam. Ports remain UNWIRED
 > (D2.21-2): the production gate, publishing approval, People authoring, and QC
 > still treat absent rights as a vacuous pass until a future cutover stage.
+>
+> **Stage 2.22 requirements declarations:** `rights_requirements` records WHAT
+> a subject requires (scope/platforms/territories, `enforce` | `record_only`;
+> UNIQUE(org, subject, scope)). Absence of a declaration = `declared: false` —
+> the vacuous-pass semantics are preserved EXACTLY (D2.22-2). `enforce` rows
+> are immutable after creation (retire by delete + re-create, D2.22-3). The
+> port adapters and the pure subject/platform mapping functions are BUILT and
+> EXPORTED but NOT injected into any composition (D2.22-4/-5) — the cutover
+> that converts vacuous passes into blocking gates remains Stage 2.23.
 
 ### Rights Owner
 A person or entity that can grant usage rights (an individual, a likeness owner, a

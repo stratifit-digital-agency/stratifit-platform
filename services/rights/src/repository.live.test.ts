@@ -80,6 +80,7 @@ const cleanupTenant = async (orgId: string) => {
   await adminSql!`delete from rights_status_events where org_id = ${orgId}`;
   await adminSql!`delete from rights_grants where org_id = ${orgId}`;
   await adminSql!`delete from rights_owners where org_id = ${orgId}`;
+  await adminSql!`delete from rights_requirements where org_id = ${orgId}`;
   await adminSql!`delete from digital_humans where org_id = ${orgId}`;
   await adminSql!`delete from audit_log where organization_id = ${orgId}`;
   await adminSql!`delete from organizations where id = ${orgId}`;
@@ -105,7 +106,7 @@ d("rights live proofs (runtime role)", () => {
     async () => {
       const [counts] =
         await runtimeSql!`select count(distinct table_name)::int as n from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_schema = 'public'`;
-      expect(counts!.n).toBe(64);
+      expect(counts!.n).toBe(65);
       const [ownerPrivs] =
         await runtimeSql!`select string_agg(privilege_type, ',' order by privilege_type) as privs from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_name = 'rights_owners' and table_schema = 'public'`;
       const [grantPrivs] =
@@ -343,5 +344,76 @@ d("rights live proofs (runtime role)", () => {
     ).rejects.toThrow();
     await expect(runtimeSql!`select count(*) from public.leads`).rejects.toThrow();
     await expect(runtimeSql!`select count(*) from public.services`).rejects.toThrow();
+  });
+
+  // -----------------------------------------------------------------------
+  // Stage 2.22 — rights_requirements (D2.22-1/-2/-3/-6)
+  // -----------------------------------------------------------------------
+
+  it("Stage 2.22: requirements declaration CRUD against the live DB with same-tx audit + UNIQUE(org,kind,subject,scope)", { timeout: 30_000 }, async () => {
+    const orgA = await provisionOrg(uuid().slice(0, 8));
+    try {
+      const service = svc();
+      const p = admin(orgA);
+      const subjectId = (
+        await adminSql!`insert into digital_humans (org_id, name, status) values (${orgA}::uuid, 'Req DH', 'draft') returning id`
+      )[0]!.id as string;
+      const created = await service.createRequirement(p, {
+        subjectKind: "digital_human",
+        subjectId,
+        scope: "publication",
+        platforms: ["stratifit_media"],
+        territories: ["worldwide"],
+        enforcement: "enforce",
+        reason: "live consent on file",
+      });
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      expect(created.value.createdBy).toBe(p.operatorId);
+      // UNIQUE(org, subject_kind, subject_id, scope) → 23505 on duplicate.
+      await expect(
+        adminSql!`insert into rights_requirements (org_id, subject_kind, subject_id, scope, platforms, territories, enforcement, created_by)
+                  values (${orgA}::uuid, 'digital_human', ${subjectId}::uuid, 'publication', array['all'], array['worldwide'], 'record_only', ${p.operatorId}::uuid)`,
+      ).rejects.toMatchObject({ code: "23505" });
+      // Audit row with the real operator.
+      const [audit] = await adminSql!`select action, actor_id from audit_log where organization_id = ${orgA} and action = 'rights.requirement_recorded'`;
+      expect(audit!.action).toBe("rights.requirement_recorded");
+      expect(audit!.actor_id).toBe(p.operatorId);
+      // D2.22-2 live: no declarations → declared:false through the evaluator.
+      const freshSubject = (
+        await adminSql!`insert into digital_humans (org_id, name, status) values (${orgA}::uuid, 'Req DH 2', 'draft') returning id`
+      )[0]!.id as string;
+      const undeclared = await service.evaluateUseAgainstRequirements(
+        orgA, "digital_human", freshSubject, "publication", "stratifit_media", "US", new Date(),
+      );
+      expect(undeclared).toEqual({ declared: false, met: true, reasons: [] });
+      // D2.22-2 live: declared subject without any grant → fail-closed.
+      const denied = await service.evaluateUseAgainstRequirements(
+        orgA, "digital_human", subjectId, "publication", "stratifit_media", "US", new Date(),
+      );
+      expect(denied.declared).toBe(true);
+      expect(denied.met).toBe(false);
+    } finally {
+      await cleanupTenant(orgA);
+    }
+  });
+
+  it("Stage 2.22: rights_requirements RLS + grants posture (map 65 regression intact, 0 PUBLIC)", { timeout: 30_000 }, async () => {
+    const rls = await runtimeSql!`
+      select c.relrowsecurity,
+        (select count(*) from pg_policy p where p.polrelid = c.oid) as policy_count,
+        (select count(*) from pg_policy p where p.polrelid = c.oid and p.polname = 'runtime_all') as runtime_all_count
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = 'public' and c.relname = 'rights_requirements'`;
+    expect(rls).toHaveLength(1);
+    expect(rls[0]!.relrowsecurity).toBe(true);
+    expect(Number(rls[0]!.policy_count)).toBe(1);
+    expect(Number(rls[0]!.runtime_all_count)).toBe(1);
+    const [privs] = await runtimeSql!`select string_agg(privilege_type, ',' order by privilege_type) as privs from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_name = 'rights_requirements' and table_schema = 'public'`;
+    expect(privs!.privs).toBe("DELETE,INSERT,SELECT,UPDATE");
+    const pub = await runtimeSql!`
+      select count(*)::int as n from information_schema.role_table_grants
+      where grantee = 'PUBLIC' and table_schema = 'public' and table_name = 'rights_requirements'`;
+    expect(pub[0]!.n).toBe(0);
   });
 });

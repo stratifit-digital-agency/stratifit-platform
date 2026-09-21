@@ -93,6 +93,28 @@ export const GrantStatusRequest = z
   })
   .strict();
 
+// Stage 2.22 (D2.22-1/-3): requirements declarations.
+export const CreateRequirementRequest = z
+  .object({
+    subjectKind: z.enum(["digital_human", "character", "persona", "asset", "production"]),
+    subjectId: uuid,
+    scope: z.enum(["generation", "publication", "advertising", "messaging", "derivative_creation"]),
+    platforms: z.array(z.enum(["stratifit_media", "youtube", "tiktok", "instagram", "facebook", "all"])).min(1).max(6),
+    territories: z.array(z.string().regex(/^worldwide$|^[A-Z]{2}$/)).min(1).max(50),
+    enforcement: z.enum(["enforce", "record_only"]),
+    reason: z.string().max(1000).nullish(),
+  })
+  .strict();
+
+export const UpdateRequirementRequest = z
+  .object({
+    platforms: z.array(z.enum(["stratifit_media", "youtube", "tiktok", "instagram", "facebook", "all"])).min(1).max(6).optional(),
+    territories: z.array(z.string().regex(/^worldwide$|^[A-Z]{2}$/)).min(1).max(50).optional(),
+    enforcement: z.enum(["enforce", "record_only"]).optional(),
+    reason: z.string().max(1000).nullish(),
+  })
+  .strict();
+
 const LIMIT_QUERY = z
   .object({ limit: z.coerce.number().int().min(1).max(200).optional() })
   .strict();
@@ -166,6 +188,61 @@ export const handleGrantStatus = async (request: Request, id: string) => {
     reason: parsed.data.reason ?? null,
   });
   return result.ok ? apiOk(result.value) : rightsError(result.error.reason, result.error.message, auth.correlationId);
+};
+
+// ---------------------------------------------------------------------------
+// Requirements handlers (Stage 2.22, D2.22-1/-3/-6)
+// ---------------------------------------------------------------------------
+
+export const handleCreateRequirement = async (request: Request) => {
+  const auth = await authorizeAdminRequest("rights.manage" as ControlCapability, request);
+  if (isAuthError(auth)) return auth.response;
+  const body = await request.json().catch(() => null);
+  const parsed = CreateRequirementRequest.safeParse(body);
+  if (!parsed.success) return validationFrom(parsed.error.issues, auth.correlationId);
+  const result = await getRightsService().createRequirement(rightsPrincipal(auth), {
+    subjectKind: parsed.data.subjectKind,
+    subjectId: parsed.data.subjectId,
+    scope: parsed.data.scope,
+    platforms: parsed.data.platforms,
+    territories: parsed.data.territories,
+    enforcement: parsed.data.enforcement,
+    reason: parsed.data.reason ?? null,
+  });
+  return result.ok ? apiOk(result.value, 201) : rightsError(result.error.reason, result.error.message, auth.correlationId);
+};
+
+export const handleUpdateRequirement = async (request: Request, id: string) => {
+  const auth = await authorizeAdminRequest("rights.manage" as ControlCapability, request);
+  if (isAuthError(auth)) return auth.response;
+  const body = await request.json().catch(() => null);
+  const parsed = UpdateRequirementRequest.safeParse(body);
+  if (!parsed.success) return validationFrom(parsed.error.issues, auth.correlationId);
+  const result = await getRightsService().updateRequirement(rightsPrincipal(auth), {
+    id,
+    ...(parsed.data.platforms !== undefined ? { platforms: parsed.data.platforms } : {}),
+    ...(parsed.data.territories !== undefined ? { territories: parsed.data.territories } : {}),
+    ...(parsed.data.enforcement !== undefined ? { enforcement: parsed.data.enforcement } : {}),
+    ...(parsed.data.reason !== undefined ? { reason: parsed.data.reason ?? null } : {}),
+  });
+  return result.ok ? apiOk(result.value) : rightsError(result.error.reason, result.error.message, auth.correlationId);
+};
+
+export const handleDeleteRequirement = async (request: Request, id: string) => {
+  const auth = await authorizeAdminRequest("rights.manage" as ControlCapability, request);
+  if (isAuthError(auth)) return auth.response;
+  const result = await getRightsService().deleteRequirement(rightsPrincipal(auth), id);
+  return result.ok ? apiOk(result.value) : rightsError(result.error.reason, result.error.message, auth.correlationId);
+};
+
+export const handleListRequirements = async (request: Request) => {
+  const auth = await authorizeAdminRequest("rights.read" as ControlCapability, request);
+  if (isAuthError(auth)) return auth.response;
+  const query = LIMIT_QUERY.safeParse(Object.fromEntries(new URL(request.url).searchParams));
+  if (!query.success) return validationFrom(query.error.issues, auth.correlationId);
+  const result = await getRightsService().listRequirements(rightsPrincipal(auth), query.data.limit);
+  if (!result.ok) return rightsError(result.error.reason, result.error.message, auth.correlationId);
+  return apiOk({ items: result.value });
 };
 
 // ---------------------------------------------------------------------------
