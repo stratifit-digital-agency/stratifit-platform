@@ -6,6 +6,13 @@ import * as schemaExports from "./schema";
 import {
   analyticsEvents,
   notifications,
+  universes,
+  worlds,
+  stories,
+  seasons,
+  episodes,
+  scenes,
+  shots,
   assetLineage,
   assetVersions,
   assets,
@@ -86,7 +93,8 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         k !== "QC_SEVERITIES" &&
         k !== "QC_ISSUE_RESOLUTIONS" &&
         k !== "CONVERSATION_STATUSES" &&
-        k !== "LEAD_STATUSES",
+        k !== "LEAD_STATUSES" &&
+        k !== "CREATIVE_STORY_KINDS",
     );
     expect(exported.sort()).toEqual(
       [
@@ -150,6 +158,17 @@ describe("identity foundation (Stage 2.3, approved shape)", () => {
         "notifications",
         // Stage 2.19 (Analytics Intake): the immutable public-beacon family.
         "analyticsEvents",
+        // Stage 2.20 (Creative / Story Foundation): the seven-level
+        // narrative hierarchy (universes → worlds → stories → seasons →
+        // episodes → scenes → shots). "scenes"/"shots" graduate from the
+        // Stage 2.6 domain-table guard reservation.
+        "universes",
+        "worlds",
+        "stories",
+        "seasons",
+        "episodes",
+        "scenes",
+        "shots",
       ].sort(),
     );
   });
@@ -410,6 +429,18 @@ const RUNTIME_PRIVILEGE_MAP: Record<string, readonly string[]> = {
   // Stage 2.19 (Analytics Intake): the FIRST PUBLIC UNAUTHENTICATED WRITE
   // surface — immutable INSERT+SELECT family (live 42501 proofs; D2.19-A1/A6).
   analytics_events: ["INSERT", "SELECT"],
+  // Stage 2.20 (Creative / Story Foundation, D2.20-9): seven org-scoped
+  // narrative-hierarchy aggregates — all mutable ARWD families (D2.20-6
+  // lifecycles; parent-chain integrity is service-enforced). NOTE: "scenes"
+  // and "shots" graduate here from the Stage 2.6 domain-table guard's
+  // forbidden list — they were reserved until their owning context shipped.
+  universes: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  worlds: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  stories: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  seasons: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  episodes: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  scenes: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+  shots: ["DELETE", "INSERT", "SELECT", "UPDATE"],
 };
 
 describe("runtime privilege posture (approved least-privilege)", () => {
@@ -553,8 +584,9 @@ describe("domain-table guard (per approved plan)", () => {
   it("contains only the approved Stage 2.6 production family beyond identity/tenancy", () => {
     const exported = Object.keys(schemaExports);
     const forbidden = [
-      "scenes",
-      "shots",
+      // "scenes" and "shots" graduated in Stage 2.20 (Creative / Story
+      // Foundation) — they were reserved by this guard until their owning
+      // context shipped.
       // "publications" graduated to an approved bounded context in Stage
       // 2.12 (Publishing Foundation) — it is no longer forbidden.
       // "aiCreators" graduated in Stage 2.16 (People: AI Creator & Public
@@ -1228,5 +1260,73 @@ describe("social graph (Stage 2.15, D2.15-1..6)", () => {
       expect(ddl).toContain(`CREATE POLICY runtime_all ON public.${tbl} FOR ALL TO stratifit_runtime USING (true) WITH CHECK (true)`);
     }
     expect(ddl).not.toMatch(/TO PUBLIC/);
+  });
+});
+
+// =============================================================================
+// Stage 2.20 — Creative / Story Foundation (D2.20-1..D2.20-9)
+// =============================================================================
+describe("creative hierarchy (Stage 2.20, D2.20-1..D2.20-9)", () => {
+  it("frozen shape: seven org-scoped aggregates, lifecycle CHECKs, hierarchy FK RESTRICT, partial uniques, RLS, ARWD grants, no Media/event surface", () => {
+    const cols = {
+      universes: getTableColumns(universes),
+      worlds: getTableColumns(worlds),
+      stories: getTableColumns(stories),
+      seasons: getTableColumns(seasons),
+      episodes: getTableColumns(episodes),
+      scenes: getTableColumns(scenes),
+      shots: getTableColumns(shots),
+    };
+    expect(Object.keys(cols.universes).sort()).toEqual(["createdAt", "description", "id", "orgId", "slug", "name", "status", "updatedAt"].sort());
+    expect(Object.keys(cols.worlds).sort()).toEqual(["createdAt", "description", "id", "orgId", "universeId", "name", "status", "updatedAt"].sort());
+    expect(Object.keys(cols.stories).sort()).toEqual(["createdAt", "id", "kind", "logline", "orgId", "status", "title", "universeId", "updatedAt", "version", "worldId"].sort());
+    expect(Object.keys(cols.seasons).sort()).toEqual(["createdAt", "id", "orgId", "seasonNumber", "status", "storyId", "title", "updatedAt"].sort());
+    expect(Object.keys(cols.episodes).sort()).toEqual(["createdAt", "episodeNumber", "id", "orgId", "productionId", "seasonId", "status", "storyId", "title", "updatedAt"].sort());
+    expect(Object.keys(cols.scenes).sort()).toEqual(["createdAt", "episodeId", "id", "orgId", "orderIndex", "productionId", "status", "storyId", "synopsis", "title", "updatedAt"].sort());
+    expect(Object.keys(cols.shots).sort()).toEqual(["aspect", "createdAt", "description", "durationSeconds", "fps", "id", "orgId", "orderIndex", "sceneId", "status", "updatedAt"].sort());
+    // D2.20 frozen optionality
+    expect(cols.worlds.universeId.notNull).toBe(true);
+    expect(cols.stories.worldId.notNull).toBe(false);
+    expect(cols.stories.universeId.notNull).toBe(false);
+    expect(cols.seasons.storyId.notNull).toBe(true);
+    expect(cols.episodes.seasonId.notNull).toBe(false);
+    expect(cols.episodes.storyId.notNull).toBe(false);
+    expect(cols.episodes.productionId.notNull).toBe(false);
+    expect(cols.scenes.storyId.notNull).toBe(false);
+    expect(cols.scenes.episodeId.notNull).toBe(false);
+    expect(cols.scenes.productionId.notNull).toBe(false);
+    expect(cols.shots.sceneId.notNull).toBe(true);
+    // D2.20-3: no script columns anywhere (scripts deferred; DM OQ8 open).
+    for (const t of Object.values(cols)) {
+      const keys = Object.keys(t);
+      expect(keys.some((k) => k.startsWith("script"))).toBe(false);
+    }
+    const ddl41 = readdirSync(fileURLToPath(new URL("../drizzle/", import.meta.url)))
+      .filter((f) => f.startsWith("0041_"))
+      .map((f) => readFileSync(fileURLToPath(new URL(`../drizzle/${f}`, import.meta.url)), "utf8"))
+      .join("\n");
+    const mustContain = [
+      "in ('draft', 'active', 'retired')", // D2.20-6 six generic tables
+      "in ('draft', 'active', 'completed', 'retired')", // stories include completed
+      "in ('film', 'series', 'short', 'campaign_narrative')", // frozen story.kind
+      'UNIQUE("story_id","season_number")',
+      'WHERE season_id is not null', 'WHERE story_id is not null and episode_id is null',
+      'REFERENCES "public"."organizations"("id") ON DELETE restrict',
+      'REFERENCES "public"."universes"("id") ON DELETE restrict',
+      'REFERENCES "public"."worlds"("id") ON DELETE restrict',
+      'REFERENCES "public"."stories"("id") ON DELETE restrict',
+      'REFERENCES "public"."seasons"("id") ON DELETE restrict',
+      'REFERENCES "public"."episodes"("id") ON DELETE restrict',
+      'REFERENCES "public"."productions"("id") ON DELETE restrict',
+      "ENABLE ROW LEVEL SECURITY",
+    ];
+    for (const fragment of mustContain) expect(ddl41).toContain(fragment);
+    const ddl42 = readFileSync(fileURLToPath(new URL("../drizzle/0042_creative_grants_policies.sql", import.meta.url)), "utf8");
+    for (const tbl of ["universes", "worlds", "stories", "seasons", "episodes", "scenes", "shots"]) {
+      expect(ddl42).toContain(`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.${tbl} TO stratifit_runtime`);
+      expect(ddl42).toContain(`CREATE POLICY "runtime_all" ON public.${tbl}`);
+    }
+    expect(ddl42).not.toMatch(/TO PUBLIC/);
+    // D2.20-4: no creative events — contracts untouched is proven in contracts.test.ts (36).
   });
 });

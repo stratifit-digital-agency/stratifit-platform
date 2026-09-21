@@ -1115,6 +1115,9 @@ still required: YES** for all ten.
 8. **Script storage.** Question: scripts as database text vs. storage references?
    Why it matters: binary/text size policy and versioning ergonomics. Recommended:
    storage reference above a size threshold. Decision still required: YES.
+   **Stage 2.20 note:** the Creative / Story foundation (D2.20-3) deliberately
+   ships NO script tables/columns and NO world-building catalog entities — this
+   question remains OPEN and scripts remain deferred until it is resolved.
 9. **Series/episode navigation.** Question: explicit series/episode refs on public
    content vs. a generic parent/child content graph? Why it matters: affects
    queries and future content shapes. Recommended: explicit refs; generic graph

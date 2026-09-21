@@ -178,7 +178,7 @@ d("messaging live — grants / RLS / constraints", () => {
     { timeout: 30_000 },
     async () => {
       const [counts] = await runtimeSql!`select count(distinct table_name)::int as n from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_schema = 'public'`;
-      expect(counts!.n).toBe(54);
+      expect(counts!.n).toBe(61);
 
     for (const t of ["conversations", "messages", "service_offerings", "service_inquiries", "service_leads", "lead_follow_ups"]) {
       const rls = (await runtimeSql!`select relrowsecurity as rls from pg_class where relname = ${t} and relnamespace = 'public'::regnamespace`)[0]!.rls as boolean;

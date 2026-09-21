@@ -858,6 +858,18 @@ Regression command (documentation-only change): run
 `pnpm exec turbo run typecheck lint test build` and confirm green. Do **not**
 modify code to make it pass.
 
+> **Stage 2.20 service note:** the Creative / Story foundation
+> (`services/creative`, bounded context 3 per DOMAIN_MODEL §8) is IMPLEMENTED
+> as a Control-only ports-and-adapters module — the seven-level narrative
+> hierarchy (universes → worlds → stories → seasons → episodes → scenes →
+> shots), frozen D2.20-6 lifecycle state machines, in-transaction parent-
+> chain integrity (same-org, non-retired parents; People precedent), the
+> dedicated `creative.manage`/`creative.read` capability family (D2.20-5),
+> fourteen same-transaction audit actions (D2.20-8), and NO events (D2.20-4).
+> Media has NO surface on this context; scripts and the world-building
+> catalog remain deferred (D2.20-2/D2.20-3); `campaign_creative` publishing
+> mediation remains fail-closed.
+
 ## 31. Deferred Implementation
 
 Explicitly deferred — none of it performed or authorized by this document:

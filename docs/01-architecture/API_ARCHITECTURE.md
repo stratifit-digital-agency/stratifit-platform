@@ -260,6 +260,18 @@ Public-safe + audience-private surface, rooted at `/api/media/*`:
 > 202 `{ accepted, eventId, deduped }` outcome (§13 error envelope on 400/413/429).
 > The route shape follows the Stage 2.17/2.18 `/api/...` precedent above.
 
+> **Stage 2.20 route note:** the Creative / Story foundation is CONTROL-ONLY
+> (D2.20-7) — implemented at `/api/control/creative/{universes,worlds,stories,
+> seasons,episodes,scenes,shots}` (GET list + POST create) and
+> `/api/control/creative/<aggregate>/[id]/status` (PATCH lifecycle) with the
+> dedicated `creative.manage` (admin+operator) / `creative.read` (all four
+> roles) capability family (D2.20-5 — NOT derived from `production.*`), strict
+> Zod, §13 error envelope, server-derived org/operator authority, in-
+> transaction parent-chain integrity (same-org, non-retired parents), the
+> frozen D2.20-6 lifecycle state machines, and the fourteen same-transaction
+> audit actions (D2.20-8). NO Media surface exists; scripts and the
+> world-building catalog remain deferred (D2.20-2/D2.20-3); no creative events
+> (D2.20-4).
 | Family | Routes (representative) | Command/Query | Auth state | Backed by |
 |---|---|---|---|---|
 | **Content reads** | `GET /api/media/content` (home / discover / trending / recommendations via mode), `GET /api/media/content/[slug]` | Query | anonymous | publishing + audience public read models; slugs only, never internal production IDs |
@@ -294,8 +306,7 @@ domain commands; they do NOT expose infrastructure primitives directly.**
 | **Plans / Gates / Manifests** | plan versions, gate evaluation requests, manifest reads | production-engine | plan/approve |
 | **Templates** | create/version templates | production-engine | `production.plan` |
 | **Creative** | universes, worlds, stories, seasons, episodes, scenes, shots, scripts, narrative catalog | creative | `production.plan` |
-| **People** | digital humans, characters, personas, AI creators, voices, wardrobe, locations | people | `production.plan` |
-| **Rights** | owners, grants, revocations, evaluations | rights | `production.plan` |
+| **People** | digital humans, characters, personas, AI creators, voices, wardrobe, locations | people | `production.plan` || **Rights** | owners, grants, revocations, evaluations | rights | `production.plan` |
 | **Assets** | register, version, approve, derivatives | assets | `production.plan` |
 | **Generations** | request generation, read provenance | generation | `generation.request` |
 | **Models** | registry CRUD + versions | packages/ai (durable rows) | `model.manage` |

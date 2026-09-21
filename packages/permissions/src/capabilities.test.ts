@@ -40,6 +40,30 @@ describe("operator capability matrix", () => {
     expect(caps).toContain("lead.assign");
   });
 
+  // Stage 2.20 (D2.20-5): dedicated creative.* family — narrative authoring
+  // is never reused production.*; read is separated from manage.
+  describe("creative.* capability family (Stage 2.20, D2.20-5)", () => {
+    it("grants creative.manage to admin and operator only", () => {
+      expect(hasCapability(["admin"], "creative.manage")).toBe(true);
+      expect(hasCapability(["operator"], "creative.manage")).toBe(true);
+      expect(hasCapability(["reviewer"], "creative.manage")).toBe(false);
+      expect(hasCapability(["viewer"], "creative.manage")).toBe(false);
+    });
+
+    it("grants creative.read to every Control role", () => {
+      for (const role of ["admin", "operator", "reviewer", "viewer"] as const) {
+        expect(hasCapability([role], "creative.read")).toBe(true);
+      }
+    });
+
+    it("never derives creative.* from production.*", () => {
+      expect(hasCapability(["operator"], "production.publish")).toBe(true);
+      expect(hasCapability(["operator"], "creative.manage")).toBe(true);
+      expect(hasCapability(["reviewer"], "creative.manage")).toBe(false);
+      expect(hasCapability(["viewer"], "creative.manage")).toBe(false);
+    });
+  });
+
   // Stage 2.16 (D2.16-4): dedicated people.* family — People authoring is
   // never reused production.publish, and read is separated from manage.
   describe("people.* capability family (Stage 2.16, D2.16-4)", () => {

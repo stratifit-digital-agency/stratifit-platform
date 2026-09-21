@@ -64,6 +64,11 @@ const elementTypes = [
   // Stage 2.19: analytics owns the immutable intake family (public beacon
   // write path; Media composes the audience-facing beacon endpoint; D2.19).
   { type: "public-service", pattern: "services/analytics/**", mode: "full" },
+  // Stage 2.20 (D2.20-7): creative owns the seven-level narrative hierarchy
+  // (universes → worlds → stories → seasons → episodes → scenes → shots).
+  // CONTROL-ONLY context: no Media surface exists or is permitted; the only
+  // consumer is the Control app (creative.manage/creative.read).
+  { type: "public-service", pattern: "services/creative/**", mode: "full" },
   { type: "control-app", pattern: "apps/stratifit-control/**", mode: "full" },
   { type: "media-app", pattern: "apps/stratifit-media/**", mode: "full" },
 ];

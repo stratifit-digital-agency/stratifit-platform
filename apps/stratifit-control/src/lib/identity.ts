@@ -62,6 +62,11 @@ import {
   createFixedWindowRateLimiter,
   type MessagingService,
 } from "@stratifit/messaging";
+import {
+  createCreativeService,
+  createDrizzleCreativeRepository,
+  type CreativeService,
+} from "@stratifit/creative";
 import { InProcessEventPublisher, idempotent } from "@stratifit/events";
 import type { DomainEventEnvelope } from "@stratifit/contracts";
 import { createDatabase } from "@stratifit/database";
@@ -102,6 +107,7 @@ let services: {
   audience: AudienceService;
   people: PeopleService;
   messaging: MessagingService;
+  creative: CreativeService;
 } | null = null;
 
 const buildServices = () => {
@@ -765,6 +771,29 @@ const buildServices = () => {
         rateLimiter: createFixedWindowRateLimiter(),
         publisher: eventBus,
       }),
+      // Stage 2.20: the Creative / Story service shares the SAME Drizzle pool
+      // and the SAME audit transaction writer (D2.4-1 reused): a Creative
+      // mutation and its audit record commit in the SAME transaction. There
+      // is NO event publisher — Creative emits nothing (D2.20-4; taxonomy
+      // stays 36). Control-only context (D2.20-7): no Media seam exists.
+      creative: createCreativeService({
+        repository: createDrizzleCreativeRepository({
+          db,
+          auditWriter: {
+            appendWithin: (tx, entry) =>
+              writer.appendWithin(tx as Parameters<typeof writer.appendWithin>[0], {
+                actorId: entry.actorId,
+                action: entry.action,
+                subjectKind: entry.targetType,
+                subjectId: entry.targetId,
+                organizationId: entry.organizationId ?? null,
+                correlationId: entry.correlationId ?? null,
+                causationId: entry.causationId ?? null,
+                payload: entry.metadata ?? {},
+              }),
+          },
+        }),
+      }),
       membership: createMembershipService({
         repository: membershipRepo,
         // D2.4-1: transaction path is primary; this fallback seam is unused
@@ -819,6 +848,9 @@ export const getPeopleService = (): PeopleService => buildServices().people;
 
 /** Exposed for the Stage 2.17 /api/control/messaging routes (D2.17-6). */
 export const getMessagingService = (): MessagingService => buildServices().messaging;
+
+/** Exposed for the Stage 2.20 /api/control/creative routes (D2.20-5/D2.20-7). */
+export const getCreativeService = (): CreativeService => buildServices().creative;
 
 /** Resolve the current operator server-side; null when anonymous/unprovisioned. */
 export const resolveControlOperator = async (): Promise<ControlOperatorContext | null> => {

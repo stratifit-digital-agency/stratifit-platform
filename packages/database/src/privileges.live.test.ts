@@ -73,6 +73,15 @@ d("runtime privilege posture (live, gated, read-only)", () => {
     "service_leads",
     // Stage 2.18 (in-app Notifications): mutable audience-owner aggregate.
     "notifications",
+    // Stage 2.20 (Creative / Story Foundation): seven mutable hierarchy
+    // aggregates — D2.20-9 ARWD families.
+    "universes",
+    "worlds",
+    "stories",
+    "seasons",
+    "episodes",
+    "scenes",
+    "shots",
   ] as const;
 
   // Immutable families (D2.6-4 / D2.7-4 / Stage 2.8 catalog versions /

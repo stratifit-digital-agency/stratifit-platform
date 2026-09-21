@@ -29,6 +29,14 @@ export const ControlCapability = [
   //   people.read   — organization-scoped read of People chain state.
   "people.manage",
   "people.read",
+  // Stage 2.20 (Creative / Story foundation, D2.20-5): dedicated creative.*
+  // capability family — narrative authoring is NOT reused production.*.
+  //   creative.manage — Control-only authoring + lifecycle of the seven
+  //     hierarchy aggregates (universes → worlds → stories → seasons →
+  //     episodes → scenes → shots).
+  //   creative.read   — organization-scoped read of Creative state.
+  "creative.manage",
+  "creative.read",
 ] as const;
 
 export type ControlCapability = (typeof ControlCapability)[number];
@@ -47,9 +55,11 @@ const ROLE_CAPABILITIES: Record<OperatorRole, readonly ControlCapability[]> = {
     "audit.read",
     "people.manage",
     "people.read",
+    "creative.manage",
+    "creative.read",
   ],
-  reviewer: ["production.approve", "audit.read", "people.read"],
-  viewer: ["audit.read", "people.read"],
+  reviewer: ["production.approve", "audit.read", "people.read", "creative.read"],
+  viewer: ["audit.read", "people.read", "creative.read"],
 };
 
 export const capabilitiesFor = (roles: readonly OperatorRole[]): readonly ControlCapability[] => {

@@ -2449,3 +2449,250 @@ export const leadFollowUps = pgTable(
 
 export type LeadFollowUpRow = typeof leadFollowUps.$inferSelect;
 export type NewLeadFollowUpRow = typeof leadFollowUps.$inferInsert;
+
+/**
+ * Creative / Story (Stage 2.20, D2.20-1..D2.20-9).
+ *
+ * Seven-level narrative hierarchy (DM section 8, bounded context 3):
+ *
+ *   universes → worlds → stories → seasons → episodes → scenes → shots
+ *
+ * HARD BOUNDARIES (frozen):
+ *  - D2.20-2: world-building catalog (locations/props/fictional orgs/vehicles/
+ *    rules/timelines) DEFERRED — worlds are structural hierarchy nodes only.
+ *  - D2.20-3: scripts DEFERRED — no script text storage (DM Open Question 8
+ *    remains open); stories carry a numeric version only.
+ *  - D2.20-4: NO creative.* events — taxonomy stays at 36.
+ *  - D2.20-7: Control-only context — no Media surface, no publishing
+ *    mediation; `campaign_creative` remains fail-closed.
+ *
+ * Conventions: org-scoped (org_id FK RESTRICT), server-side parent-chain
+ * integrity at the service layer (same-org, non-retired parents — People
+ * precedent), lifecycle CHECKs, mutable ARWD family granted in 0042.
+ */
+export const CREATIVE_STORY_KINDS = ["film", "series", "short", "campaign_narrative"] as const;
+
+export const universes = pgTable(
+  "universes",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    description: text("description"),
+    status: text("status").notNull().default("draft"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("universes_status_check", sql`${t.status} in ('draft', 'active', 'retired')`),
+    check("universes_name_length_check", sql`char_length(${t.name}) between 1 and 200`),
+    check("universes_slug_shape_check", sql`${t.slug} ~ '^[a-z0-9-]{3,64}$'`),
+    unique("universes_org_slug_unique").on(t.orgId, t.slug),
+    index("idx_universes_org_status").on(t.orgId, t.status),
+  ],
+).enableRLS();
+
+export type UniverseRow = typeof universes.$inferSelect;
+export type NewUniverseRow = typeof universes.$inferInsert;
+
+export const worlds = pgTable(
+  "worlds",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    universeId: uuid("universe_id")
+      .notNull()
+      .references((): AnyPgColumn => universes.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    status: text("status").notNull().default("draft"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("worlds_status_check", sql`${t.status} in ('draft', 'active', 'retired')`),
+    check("worlds_name_length_check", sql`char_length(${t.name}) between 1 and 200`),
+    index("idx_worlds_org_status").on(t.orgId, t.status),
+    index("idx_worlds_universe").on(t.universeId),
+  ],
+).enableRLS();
+
+export type WorldRow = typeof worlds.$inferSelect;
+export type NewWorldRow = typeof worlds.$inferInsert;
+
+export const stories = pgTable(
+  "stories",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    worldId: uuid("world_id").references((): AnyPgColumn => worlds.id, { onDelete: "restrict" }),
+    universeId: uuid("universe_id")
+      .references((): AnyPgColumn => universes.id, { onDelete: "restrict" }),
+    title: text("title").notNull(),
+    logline: text("logline").notNull(),
+    kind: text("kind").notNull(),
+    version: integer("version").notNull().default(1),
+    status: text("status").notNull().default("draft"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("stories_status_check", sql`${t.status} in ('draft', 'active', 'completed', 'retired')`),
+    check("stories_kind_check", sql`${t.kind} in ('film', 'series', 'short', 'campaign_narrative')`),
+    check("stories_title_length_check", sql`char_length(${t.title}) between 1 and 300`),
+    check("stories_logline_length_check", sql`char_length(${t.logline}) between 1 and 1000`),
+    check("stories_version_positive_check", sql`${t.version} >= 1`),
+    index("idx_stories_org_status").on(t.orgId, t.status),
+    index("idx_stories_world").on(t.worldId),
+    index("idx_stories_universe").on(t.universeId),
+  ],
+).enableRLS();
+
+export type StoryRow = typeof stories.$inferSelect;
+export type NewStoryRow = typeof stories.$inferInsert;
+
+export const seasons = pgTable(
+  "seasons",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    storyId: uuid("story_id")
+      .notNull()
+      .references((): AnyPgColumn => stories.id, { onDelete: "restrict" }),
+    seasonNumber: integer("season_number").notNull(),
+    title: text("title").notNull(),
+    status: text("status").notNull().default("draft"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("seasons_status_check", sql`${t.status} in ('draft', 'active', 'retired')`),
+    check("seasons_title_length_check", sql`char_length(${t.title}) between 1 and 300`),
+    check("seasons_number_positive_check", sql`${t.seasonNumber} >= 1`),
+    unique("seasons_story_number_unique").on(t.storyId, t.seasonNumber),
+    index("idx_seasons_org_status").on(t.orgId, t.status),
+    index("idx_seasons_story").on(t.storyId),
+  ],
+).enableRLS();
+
+export type SeasonRow = typeof seasons.$inferSelect;
+export type NewSeasonRow = typeof seasons.$inferInsert;
+
+export const episodes = pgTable(
+  "episodes",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    seasonId: uuid("season_id").references((): AnyPgColumn => seasons.id, { onDelete: "restrict" }),
+    storyId: uuid("story_id").references((): AnyPgColumn => stories.id, { onDelete: "restrict" }),
+    /** D2.20: nullable settable-at-creation only; NOT updatable via Stage 2.20 commands. */
+    productionId: uuid("production_id").references((): AnyPgColumn => productions.id, {
+      onDelete: "restrict",
+    }),
+    episodeNumber: integer("episode_number").notNull(),
+    title: text("title").notNull(),
+    status: text("status").notNull().default("draft"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("episodes_status_check", sql`${t.status} in ('draft', 'active', 'retired')`),
+    check("episodes_title_length_check", sql`char_length(${t.title}) between 1 and 300`),
+    check("episodes_number_positive_check", sql`${t.episodeNumber} >= 1`),
+    uniqueIndex("episodes_season_number_unique")
+      .on(t.seasonId, t.episodeNumber)
+      .where(sql`season_id is not null`),
+    index("idx_episodes_org_status").on(t.orgId, t.status),
+    index("idx_episodes_season").on(t.seasonId),
+    index("idx_episodes_story").on(t.storyId),
+  ],
+).enableRLS();
+
+export type EpisodeRow = typeof episodes.$inferSelect;
+export type NewEpisodeRow = typeof episodes.$inferInsert;
+
+export const scenes = pgTable(
+  "scenes",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    storyId: uuid("story_id").references((): AnyPgColumn => stories.id, { onDelete: "restrict" }),
+    episodeId: uuid("episode_id")
+      .references((): AnyPgColumn => episodes.id, { onDelete: "restrict" }),
+    /** D2.20: nullable settable-at-creation only; NOT updatable via Stage 2.20 commands. */
+    productionId: uuid("production_id").references((): AnyPgColumn => productions.id, {
+      onDelete: "restrict",
+    }),
+    orderIndex: integer("order_index").notNull(),
+    title: text("title").notNull(),
+    synopsis: text("synopsis"),
+    status: text("status").notNull().default("draft"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("scenes_status_check", sql`${t.status} in ('draft', 'active', 'retired')`),
+    check("scenes_title_length_check", sql`char_length(${t.title}) between 1 and 300`),
+    check("scenes_order_nonnegative_check", sql`${t.orderIndex} >= 0`),
+    uniqueIndex("scenes_episode_order_unique")
+      .on(t.episodeId, t.orderIndex)
+      .where(sql`episode_id is not null`),
+    uniqueIndex("scenes_story_order_unique")
+      .on(t.storyId, t.orderIndex)
+      .where(sql`story_id is not null and episode_id is null`),
+    index("idx_scenes_org_status").on(t.orgId, t.status),
+    index("idx_scenes_story").on(t.storyId),
+    index("idx_scenes_episode").on(t.episodeId),
+  ],
+).enableRLS();
+
+export type SceneRow = typeof scenes.$inferSelect;
+export type NewSceneRow = typeof scenes.$inferInsert;
+
+export const shots = pgTable(
+  "shots",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "restrict" }),
+    sceneId: uuid("scene_id")
+      .notNull()
+      .references((): AnyPgColumn => scenes.id, { onDelete: "restrict" }),
+    orderIndex: integer("order_index").notNull(),
+    description: text("description").notNull(),
+    aspect: text("aspect").notNull(),
+    durationSeconds: integer("duration_seconds").notNull(),
+    fps: integer("fps").notNull(),
+    status: text("status").notNull().default("draft"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("shots_status_check", sql`${t.status} in ('draft', 'active', 'retired')`),
+    check("shots_description_length_check", sql`char_length(${t.description}) between 1 and 2000`),
+    check("shots_order_nonnegative_check", sql`${t.orderIndex} >= 0`),
+    check("shots_aspect_shape_check", sql`char_length(${t.aspect}) between 1 and 20`),
+    check("shots_duration_positive_check", sql`${t.durationSeconds} > 0`),
+    check("shots_fps_range_check", sql`${t.fps} between 1 and 240`),
+    unique("shots_scene_order_unique").on(t.sceneId, t.orderIndex),
+    index("idx_shots_org_status").on(t.orgId, t.status),
+    index("idx_shots_scene").on(t.sceneId),
+  ],
+).enableRLS();
+
+export type ShotRow = typeof shots.$inferSelect;
+export type NewShotRow = typeof shots.$inferInsert;

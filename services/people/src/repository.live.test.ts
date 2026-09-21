@@ -150,7 +150,7 @@ d("people live proofs (runtime role)", () => {
     { timeout: 30_000 },
     async () => {
       const [counts] = await runtimeSql!`select count(distinct table_name)::int as n from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_schema = 'public'`;
-      expect(counts!.n).toBe(54);
+      expect(counts!.n).toBe(61);
       for (const table of ["digital_humans", "characters", "personas", "ai_creators", "creator_profiles"]) {
         const [row] = await runtimeSql!`select string_agg(privilege_type, ',' order by privilege_type) as privs from information_schema.role_table_grants where grantee = 'stratifit_runtime' and table_name = ${table} and table_schema = 'public'`;
         expect(row!.privs).toBe("DELETE,INSERT,SELECT,UPDATE");
